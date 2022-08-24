@@ -222,19 +222,28 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 	evm.Context.Transfer(evm.StateDB, caller.Address(), addr, value)
 
 	// Capture the tracer start/end events in debug mode
+	/*
+		    if debug {
+				if evm.depth == 0 {
+					evm.Config.Tracer.CaptureStart(evm, caller.Address(), addr, false, input, gas, value)
+					defer func(startGas uint64) { // Lazy evaluation of the parameters
+						evm.Config.Tracer.CaptureEnd(ret, startGas-gas, err)
+					}(gas)
+				} else {
+					// Handle tracer events for entering and exiting a call frame
+					evm.Config.Tracer.CaptureEnter(CALL, caller.Address(), addr, input, gas, value)
+					defer func(startGas uint64) {
+						evm.Config.Tracer.CaptureExit(ret, startGas-gas, err)
+					}(gas)
+				}
+	*/
 	if debug {
-		if evm.depth == 0 {
-			evm.Config.Tracer.CaptureStart(evm, caller.Address(), addr, false, input, gas, value.ToBig())
-			defer func(startGas uint64) { // Lazy evaluation of the parameters
-				evm.Config.Tracer.CaptureEnd(ret, startGas-gas, err)
-			}(gas)
-		} else {
-			// Handle tracer events for entering and exiting a call frame
-			evm.Config.Tracer.CaptureEnter(CALL, caller.Address(), addr, input, gas, value.ToBig())
-			defer func(startGas uint64) {
-				evm.Config.Tracer.CaptureExit(ret, startGas-gas, err)
-			}(gas)
-		}
+		// 0: Trace_CALL
+		evm.Config.Tracer.SetTraceType(0)
+		evm.Config.Tracer.CaptureStart(evm, caller.Address(), addr, false, input, gas, value.ToBig())
+		defer func(startGas uint64) { // Lazy evaluation of the parameters
+			evm.Config.Tracer.CaptureEnd(ret, startGas-gas, err)
+		}(gas)
 	}
 
 	if isPrecompile {
@@ -300,10 +309,20 @@ func (evm *EVM) CallCode(caller ContractRef, addr common.Address, input []byte, 
 	var snapshot = evm.StateDB.Snapshot()
 
 	// Invoke tracer hooks that signal entering/exiting a call frame
+	/*
+		    if evm.Config.Tracer != nil {
+				evm.Config.Tracer.CaptureEnter(CALLCODE, caller.Address(), addr, input, gas, value)
+				defer func(startGas uint64) {
+					evm.Config.Tracer.CaptureExit(ret, startGas-gas, err)
+				}(gas)
+	*/
 	if evm.Config.Tracer != nil {
-		evm.Config.Tracer.CaptureEnter(CALLCODE, caller.Address(), addr, input, gas, value.ToBig())
-		defer func(startGas uint64) {
-			evm.Config.Tracer.CaptureExit(ret, startGas-gas, err)
+		//fmt.Print("CallCode Depth: ", evm.depth, "\n")
+		// 1: Trace_CALLCODE
+		evm.Config.Tracer.SetTraceType(1)
+		evm.Config.Tracer.CaptureStart(evm, caller.Address(), addr, false, input, gas, value.ToBig())
+		defer func(startGas uint64) { // Lazy evaluation of the parameters
+			evm.Config.Tracer.CaptureEnd(ret, startGas-gas, err)
 		}(gas)
 	}
 
@@ -353,14 +372,25 @@ func (evm *EVM) DelegateCall(caller ContractRef, addr common.Address, input []by
 	var snapshot = evm.StateDB.Snapshot()
 
 	// Invoke tracer hooks that signal entering/exiting a call frame
+	/*
+		    if evm.Config.Tracer != nil {
+				// NOTE: caller must, at all times be a contract. It should never happen
+				// that caller is something other than a Contract.
+				parent := caller.(*Contract)
+				// DELEGATECALL inherits value from parent call
+				evm.Config.Tracer.CaptureEnter(DELEGATECALL, caller.Address(), addr, input, gas, parent.value)
+				defer func(startGas uint64) {
+					evm.Config.Tracer.CaptureExit(ret, startGas-gas, err)
+				}(gas)
+	*/
 	if evm.Config.Tracer != nil {
-		// NOTE: caller must, at all times be a contract. It should never happen
-		// that caller is something other than a Contract.
 		parent := caller.(*Contract)
-		// DELEGATECALL inherits value from parent call
-		evm.Config.Tracer.CaptureEnter(DELEGATECALL, caller.Address(), addr, input, gas, parent.value.ToBig())
-		defer func(startGas uint64) {
-			evm.Config.Tracer.CaptureExit(ret, startGas-gas, err)
+		//fmt.Print("DelegateCall Depth: ", evm.depth, "\n")
+		// 2: Trace_DELEGATECALL
+		evm.Config.Tracer.SetTraceType(2)
+		evm.Config.Tracer.CaptureStart(evm, caller.Address(), addr, false, input, gas, parent.value.ToBig())
+		defer func(startGas uint64) { // Lazy evaluation of the parameters
+			evm.Config.Tracer.CaptureEnd(ret, startGas-gas, err)
 		}(gas)
 	}
 
@@ -420,10 +450,20 @@ func (evm *EVM) StaticCall(caller ContractRef, addr common.Address, input []byte
 	evm.StateDB.AddBalance(addr, new(uint256.Int))
 
 	// Invoke tracer hooks that signal entering/exiting a call frame
+	/*
+		if evm.Config.Tracer != nil {
+			evm.Config.Tracer.CaptureEnter(STATICCALL, caller.Address(), addr, input, gas, nil)
+			defer func(startGas uint64) {
+				evm.Config.Tracer.CaptureExit(ret, startGas-gas, err)
+			}(gas)
+	*/
 	if evm.Config.Tracer != nil {
-		evm.Config.Tracer.CaptureEnter(STATICCALL, caller.Address(), addr, input, gas, nil)
-		defer func(startGas uint64) {
-			evm.Config.Tracer.CaptureExit(ret, startGas-gas, err)
+		//fmt.Print("StaticCall Depth: ", evm.depth, "\n")
+		// 3: Trace_STATICCALL
+		evm.Config.Tracer.SetTraceType(3)
+		evm.Config.Tracer.CaptureStart(evm, caller.Address(), addr, false, input, gas, big.NewInt(0))
+		defer func(startGas uint64) { // Lazy evaluation of the parameters
+			evm.Config.Tracer.CaptureEnd(ret, startGas-gas, err)
 		}(gas)
 	}
 
@@ -511,12 +551,16 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64,
 	contract := NewContract(caller, AccountRef(address), value, gas)
 	contract.SetCodeOptionalHash(&address, codeAndHash)
 
+	/*
+		if evm.Config.Tracer != nil {
+			if evm.depth == 0 {
+				evm.Config.Tracer.CaptureStart(evm, caller.Address(), address, true, codeAndHash.code, gas, value)
+			} else {
+				evm.Config.Tracer.CaptureEnter(typ, caller.Address(), address, codeAndHash.code, gas, value)
+			}
+	*/
 	if evm.Config.Tracer != nil {
-		if evm.depth == 0 {
-			evm.Config.Tracer.CaptureStart(evm, caller.Address(), address, true, codeAndHash.code, gas, value.ToBig())
-		} else {
-			evm.Config.Tracer.CaptureEnter(typ, caller.Address(), address, codeAndHash.code, gas, value.ToBig())
-		}
+		evm.Config.Tracer.CaptureStart(evm, caller.Address(), address, true, codeAndHash.code, gas, value.ToBig())
 	}
 
 	ret, err := evm.interpreter.Run(contract, nil, false)
@@ -559,12 +603,16 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64,
 		}
 	}
 
+	/*
+		if evm.Config.Tracer != nil {
+			if evm.depth == 0 {
+				evm.Config.Tracer.CaptureEnd(ret, gas-contract.Gas, err)
+			} else {
+				evm.Config.Tracer.CaptureExit(ret, gas-contract.Gas, err)
+			}
+	*/
 	if evm.Config.Tracer != nil {
-		if evm.depth == 0 {
-			evm.Config.Tracer.CaptureEnd(ret, gas-contract.Gas, err)
-		} else {
-			evm.Config.Tracer.CaptureExit(ret, gas-contract.Gas, err)
-		}
+		evm.Config.Tracer.CaptureEnd(ret, gas-contract.Gas, err)
 	}
 	return ret, address, contract.Gas, err
 }
@@ -572,6 +620,10 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64,
 // Create creates a new contract using code as deployment code.
 func (evm *EVM) Create(caller ContractRef, code []byte, gas uint64, value *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas uint64, err error) {
 	contractAddr = crypto.CreateAddress(caller.Address(), evm.StateDB.GetNonce(caller.Address()))
+	// 4: Trace_CREATE
+	if evm.Config.Tracer != nil {
+		evm.Config.Tracer.SetTraceType(4)
+	}
 	return evm.create(caller, &codeAndHash{code: code}, gas, value, contractAddr, CREATE)
 }
 
@@ -582,7 +634,21 @@ func (evm *EVM) Create(caller ContractRef, code []byte, gas uint64, value *uint2
 func (evm *EVM) Create2(caller ContractRef, code []byte, gas uint64, endowment *uint256.Int, salt *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas uint64, err error) {
 	codeAndHash := &codeAndHash{code: code}
 	contractAddr = crypto.CreateAddress2(caller.Address(), salt.Bytes32(), codeAndHash.Hash().Bytes())
+	// 5: Trace_CREATE2
+	if evm.Config.Tracer != nil {
+		evm.Config.Tracer.SetTraceType(5)
+	}
 	return evm.create(caller, codeAndHash, gas, endowment, contractAddr, CREATE2)
+}
+
+// Suicide pass the contract, beneficiary and balance info to tracer for suisuide case
+func (evm *EVM) Suicide(contractAddr, beneficiaryAddr common.Address, balance *big.Int) {
+	if evm.Config.Tracer != nil {
+		// 6: Trace_SELFDESTRUCT
+		evm.Config.Tracer.SetTraceType(6)
+		evm.Config.Tracer.CaptureStart(evm, contractAddr, beneficiaryAddr, false, nil, 0, balance)
+		evm.Config.Tracer.CaptureEnd(nil, 0, nil)
+	}
 }
 
 // ChainConfig returns the environment's chain configuration

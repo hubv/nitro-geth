@@ -269,6 +269,8 @@ func (l *StructLogger) CaptureTxStart(gasLimit uint64) {
 func (l *StructLogger) CaptureTxEnd(restGas uint64) {
 	l.usedGas = l.gasLimit - restGas
 }
+func (l *StructLogger) SetTraceType(tracetype int8) {
+}
 
 // StructLogs returns the captured log entries.
 func (l *StructLogger) StructLogs() []StructLog { return l.logs }
@@ -391,6 +393,9 @@ func (t *mdLogger) CaptureEnd(output []byte, gasUsed uint64, err error) {
 }
 
 func (t *mdLogger) CaptureEnter(typ vm.OpCode, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
+}
+
+func (t *mdLogger) SetTraceType(tracetype int8) {
 }
 
 func (t *mdLogger) CaptureExit(output []byte, gasUsed uint64, err error) {}

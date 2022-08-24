@@ -48,4 +48,5 @@ type EVMLogger interface {
 	// Opcode level
 	CaptureState(pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, rData []byte, depth int, err error)
 	CaptureFault(pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, depth int, err error)
+	SetTraceType(tracetype int8)
 }
