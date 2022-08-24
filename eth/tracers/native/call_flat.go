@@ -287,6 +287,9 @@ func (t *flatCallTracer) isPrecompiled(addr common.Address) bool {
 	return false
 }
 
+func (t *flatCallTracer) SetTraceType(tracetype int8) {
+}
+
 func flatFromNested(input *callFrame, traceAddress []int, convertErrs bool, ctx *tracers.Context) (output []flatCallFrame, err error) {
 	var frame *flatCallFrame
 	switch input.Type {

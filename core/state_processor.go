@@ -17,10 +17,17 @@
 package core
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"math/big"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc"
@@ -73,30 +80,132 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	var (
 		context = NewEVMBlockContext(header, p.bc, nil)
 		vmenv   = vm.NewEVM(context, vm.TxContext{}, statedb, p.config, cfg)
-		signer  = types.MakeSigner(p.config, header.Number, header.Time)
 	)
 	if beaconRoot := block.BeaconRoot(); beaconRoot != nil {
 		ProcessBeaconBlockRoot(*beaconRoot, vmenv, statedb)
 	}
+	blockContext := NewEVMBlockContext(header, p.bc, nil)
+	signer := types.MakeSigner(p.config, header.Number, header.Time)
+
+	txinfo := vm.NewTxInfo()
+	var file1 *os.File = nil
+	var file2 *os.File = nil
+	var file3 *os.File = nil
+	t := time.Unix(int64(block.Time()), 0)
+	day := t.UTC().Format("2006-01-02")
+	blknum := blockNumber.String()
+	hash_prefix := blockHash.String()
+	txfile := fmt.Sprintf("%s_%s.csv", blknum, hash_prefix[2:8])
+	if block.Transactions().Len() != 0 {
+
+		blkinfo := vm.NewBlockInfo(block.Time(), day, blockHash.Hex(), blknum)
+
+		path1 := "/data01/full_node/dump"
+		path2 := "/data01/full_node/events"
+
+		//path := "/Users/vincent/Downloads/heco/dump"
+		subpath1 := filepath.Join(path1, day, strconv.Itoa(t.UTC().Hour()))
+		if _, err1 := os.Stat(subpath1); os.IsNotExist(err1) {
+			err1 = os.MkdirAll(subpath1, os.ModePerm)
+			if err1 != nil {
+				fmt.Printf("failed creating subpath: %s", err1)
+			}
+		}
+
+		var err12 error
+		file1, err12 = os.OpenFile(filepath.Join(subpath1, txfile), os.O_WRONLY|os.O_CREATE, 0644)
+
+		if err12 != nil {
+			fmt.Printf("failed creating file: %s", err12)
+			file1 = nil
+		}
+		datawriter1 := bufio.NewWriter(file1)
+
+		if block.Bloom().Big().String() != "0" {
+			subpath2 := filepath.Join(path2, day, strconv.Itoa(t.UTC().Hour()))
+			if _, err2 := os.Stat(subpath2); os.IsNotExist(err2) {
+				err2 = os.MkdirAll(subpath2, os.ModePerm)
+				if err2 != nil {
+					fmt.Printf("failed creating subpath: %s", err2)
+				}
+			}
+
+			var err22 error
+			file2, err22 = os.OpenFile(filepath.Join(subpath2, txfile), os.O_WRONLY|os.O_CREATE, 0644)
+
+			if err22 != nil {
+				fmt.Printf("failed creating file: %s", err22)
+				file2 = nil
+			}
+
+		}
+
+		datawriter2 := bufio.NewWriter(file2)
+
+		cfg.Tracer = vm.NewCSVTracer(blkinfo, txinfo, datawriter1, datawriter2)
+	}
+
+	vmenv = vm.NewEVM(blockContext, vm.TxContext{}, statedb, p.config, cfg)
 	// Iterate over and process the individual transactions
 	for i, tx := range block.Transactions() {
+		txhash := tx.Hash().Hex()
 		msg, err := TransactionToMessage(tx, signer, header.BaseFee, MessageCommitMode)
+		if msg.To != nil {
+			txinfo.UpdateTxInfo(i, txhash, msg.From.Hex(), msg.To.Hex())
+		} else {
+			txinfo.UpdateTxInfo(i, txhash, msg.From.Hex(), "")
+		}
 		if err != nil {
 			return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
 		}
 		statedb.SetTxContext(tx.Hash(), i)
-		receipt, _, err := applyTransaction(msg, p.config, gp, statedb, blockNumber, blockHash, tx, usedGas, vmenv, nil)
+		receipt, _, reason, err := applyTransaction2(msg, p.config, gp, statedb, blockNumber, blockHash, tx, usedGas, vmenv, nil)
 		if err != nil {
 			return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
+		}
+		if reason != "" {
+			path3 := "/data01/full_node/errors"
+			subpath3 := filepath.Join(path3, day, strconv.Itoa(t.UTC().Hour()))
+			if _, err3 := os.Stat(subpath3); os.IsNotExist(err3) {
+				err3 = os.MkdirAll(subpath3, os.ModePerm)
+				if err3 != nil {
+					fmt.Printf("failed creating subpath: %s", err3)
+				}
+			}
+
+			var err32 error
+			file3, err32 = os.OpenFile(filepath.Join(subpath3, txfile), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+
+			if err32 != nil {
+				fmt.Printf("failed creating file: %s", err32)
+				file3 = nil
+			}
+			datawriter3 := bufio.NewWriter(file3)
+			errinfo := []string{
+				strings.ToLower(txhash),
+				reason}
+			_, _ = datawriter3.WriteString(strings.Join(errinfo, "^") + "\n")
+			datawriter3.Flush()
 		}
 		receipts = append(receipts, receipt)
 		allLogs = append(allLogs, receipt.Logs...)
 	}
+	if block.Transactions().Len() != 0 && file1 != nil {
+		//close file, so that finalize can reopen it for systemTxs traces
+		file1.Close()
+
+		if block.Bloom().Big().String() != "0" && file2 != nil {
+			file2.Close()
+		}
+
+	}
+
 	// Fail if Shanghai not enabled and len(withdrawals) is non-zero.
 	withdrawals := block.Withdrawals()
 	if len(withdrawals) > 0 && !p.config.IsShanghai(block.Number(), block.Time(), types.DeserializeHeaderExtraInformation(header).ArbOSFormatVersion) {
 		return nil, nil, 0, errors.New("withdrawals before shanghai")
 	}
+
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
 	p.engine.Finalize(p.bc, header, statedb, block.Transactions(), block.Uncles(), withdrawals)
 
@@ -159,6 +268,66 @@ func applyTransaction(msg *Message, config *params.ChainConfig, gp *GasPool, sta
 	receipt.TransactionIndex = uint(statedb.TxIndex())
 	evm.ProcessingHook.FillReceiptInfo(receipt)
 	return receipt, result, err
+}
+
+func applyTransaction2(msg *Message, config *params.ChainConfig, gp *GasPool, statedb *state.StateDB, blockNumber *big.Int, blockHash common.Hash, tx *types.Transaction, usedGas *uint64, evm *vm.EVM, resultFilter func(*ExecutionResult) error) (*types.Receipt, *ExecutionResult, string, error) {
+	// Create a new context to be used in the EVM environment.
+	txContext := NewEVMTxContext(msg)
+	evm.Reset(txContext, statedb)
+	revertreason := ""
+	// Apply the transaction to the current state (included in the env).
+	result, err := ApplyMessage(evm, msg, gp)
+	if err != nil {
+		return nil, nil, revertreason, err
+	}
+
+	if resultFilter != nil {
+		err = resultFilter(result)
+		if err != nil {
+			return nil, nil, revertreason, err
+		}
+	}
+
+	if len(result.Revert()) > 0 {
+		reason, errUnpack := abi.UnpackRevert(result.Revert())
+		if errUnpack == nil {
+			revertreason = reason
+		}
+	}
+
+	// Update the state with pending changes.
+	var root []byte
+	if config.IsByzantium(blockNumber) {
+		statedb.Finalise(true)
+	} else {
+		root = statedb.IntermediateRoot(config.IsEIP158(blockNumber)).Bytes()
+	}
+	*usedGas += result.UsedGas
+
+	// Create a new receipt for the transaction, storing the intermediate root and gas used
+	// by the tx.
+	receipt := &types.Receipt{Type: tx.Type(), PostState: root, CumulativeGasUsed: *usedGas}
+	if result.Failed() {
+		receipt.Status = types.ReceiptStatusFailed
+	} else {
+		receipt.Status = types.ReceiptStatusSuccessful
+	}
+	receipt.TxHash = tx.Hash()
+	receipt.GasUsed = result.UsedGas
+
+	// If the transaction created a contract, store the creation address in the receipt.
+	if result.TopLevelDeployed != nil {
+		receipt.ContractAddress = *result.TopLevelDeployed
+	}
+
+	// Set the receipt logs and create the bloom filter.
+	receipt.Logs = statedb.GetLogs(tx.Hash(), blockNumber.Uint64(), blockHash)
+	receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
+	receipt.BlockHash = blockHash
+	receipt.BlockNumber = blockNumber
+	receipt.TransactionIndex = uint(statedb.TxIndex())
+	evm.ProcessingHook.FillReceiptInfo(receipt)
+	return receipt, result, revertreason, err
 }
 
 // ApplyTransaction attempts to apply a transaction to the given state database

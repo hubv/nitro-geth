@@ -166,6 +166,9 @@ func (*AccessListTracer) CaptureEnd(output []byte, gasUsed uint64, err error) {}
 func (*AccessListTracer) CaptureEnter(typ vm.OpCode, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
 }
 
+func (l *AccessListTracer) SetTraceType(tracetype int8) {
+}
+
 func (*AccessListTracer) CaptureExit(output []byte, gasUsed uint64, err error) {}
 
 func (*AccessListTracer) CaptureTxStart(gasLimit uint64) {}
