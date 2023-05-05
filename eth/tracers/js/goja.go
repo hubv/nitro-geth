@@ -225,6 +225,8 @@ func newJsTracer(code string, ctx *tracers.Context, cfg json.RawMessage) (tracer
 func (t *jsTracer) CaptureTxStart(gasLimit uint64) {
 	t.gasLimit = gasLimit
 }
+func (t *jsTracer) SetTraceType(tracetype int8) {
+}
 
 // CaptureTxEnd implements the Tracer interface and is invoked at the end of
 // transaction processing.

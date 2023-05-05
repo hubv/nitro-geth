@@ -96,6 +96,8 @@ func (s *EthereumAPI) MaxPriorityFeePerGas(ctx context.Context) (*hexutil.Big, e
 	return (*hexutil.Big)(tipcap), err
 }
 
+const Allzero = "0x0000000000000000000000000000000000000000"
+
 type feeHistoryResult struct {
 	OldestBlock  *hexutil.Big     `json:"oldestBlock"`
 	Reward       [][]*hexutil.Big `json:"reward,omitempty"`
@@ -1255,6 +1257,679 @@ func (s *BlockChainAPI) Call(ctx context.Context, args TransactionArgs, blockNrO
 // successfully at block `blockNrOrHash`. It returns error if the transaction would revert, or if
 // there are unexpected failures. The gas limit is capped by both `args.Gas` (if non-nil &
 // non-zero) and `gasCap` (if non-zero).
+type DumpResult struct {
+	Err        string
+	UsedGas    uint64
+	ReturnData hexutil.Bytes
+	Nonce      hexutil.Uint64
+}
+
+func getTokenBalanceOf(backend Backend, ctx context.Context, balances balanceState, stateOriginal *state.StateDB, header *types.Header) error {
+	defer func(start time.Time) { log.Debug("Executing EVM call finished", "runtime", time.Since(start)) }(time.Now())
+
+	// Setup context so it may be cancelled the call has completed
+	// or, in case of unmetered gas, setup a context with a timeout.
+	var cancel context.CancelFunc
+
+	ctx, cancel = context.WithTimeout(ctx, 1*time.Second)
+
+	// Make sure the context is cancelled when the call has completed
+	// this makes sure resources are cleaned up.
+	defer cancel()
+	from := common.HexToAddress(Allzero)
+	args := TransactionArgs{
+		From:     &from,
+		GasPrice: (*hexutil.Big)(big.NewInt(1000)),
+	}
+	// Get a new instance of the EVM.
+	msg, err := args.ToMessage(backend.RPCGasCap(), header, stateOriginal, core.MessageEthcallMode)
+	if err != nil {
+		return err
+	}
+	msg.TxRunMode = core.MessageEthcallMode
+	evm, vmError := backend.GetEVM(ctx, msg, stateOriginal, header, &vm.Config{NoBaseFee: true}, nil)
+	if err := vmError(); err != nil {
+		return err
+	}
+
+	// Execute the message.
+	gp := new(core.GasPool).AddGas(math.MaxUint64)
+
+	// If the timer caused an abort, return an appropriate error message
+	if evm.Cancelled() {
+		return fmt.Errorf("execution aborted (timeout = %v)", 1*time.Second)
+	}
+
+	for address, tokenlist := range balances {
+		for token, value := range tokenlist {
+			input := []byte("0x70a08231000000000000000000000000" + address[2:])
+			var data hexutil.Bytes
+			data.UnmarshalText(input)
+			from := common.HexToAddress(address)
+			to := common.HexToAddress(token)
+			args := TransactionArgs{
+				From: &from,
+				To:   &to,
+				Data: &data,
+			}
+			msg, err := args.ToMessage(backend.RPCGasCap(), header, stateOriginal, core.MessageEthcallMode)
+			if err != nil {
+				return err
+			}
+			msg.TxRunMode = core.MessageEthcallMode
+			result, err := core.ApplyMessage(evm, msg, gp)
+			if err != nil {
+				return err
+			}
+			tb := result.Return()
+			if tb != nil {
+				value[0].SetBytes(tb)
+			}
+			if value[1].Cmp(big.NewInt(0)) == 0 {
+				delete(tokenlist, token)
+			}
+		}
+		if len(tokenlist) == 0 {
+			delete(balances, address)
+		}
+	}
+	return nil
+}
+
+func updateAddressBalance(balances balanceState, state *state.StateDB, backend Backend, ctx context.Context, addr string, tokenAddr string, amount *big.Int, stateOriginal *state.StateDB) {
+	addr = strings.ToLower(addr)
+	tokenAddr = strings.ToLower(tokenAddr)
+	v0, found := balances[addr]
+	if found {
+		v1, foundToken := v0[tokenAddr]
+		if foundToken {
+			v1[1].Add(v1[1], amount)
+		} else {
+			b := big.NewInt(-1)
+			bc := [2]*big.Int{b, amount}
+			balances[addr][tokenAddr] = bc
+		}
+	} else {
+		tbc := make(map[string][2]*big.Int)
+		if tokenAddr != Allzero {
+			b := big.NewInt(-1)
+			bc := [2]*big.Int{b, amount}
+			tbc[tokenAddr] = bc
+		}
+		//First entry for Addr, add native token balance
+		b1 := state.GetBalance(common.HexToAddress(addr))
+		b2 := stateOriginal.GetBalance(common.HexToAddress(addr))
+		bc1 := [2]*big.Int{b2, new(big.Int).Sub(b1, b2)}
+		tbc[Allzero] = bc1
+		balances[addr] = tbc
+	}
+}
+
+func updateBalanceState(balances balanceState, state *state.StateDB, b Backend, ctx context.Context, stateOriginal *state.StateDB, header *types.Header) {
+	//Transfer(address,address,uin256)
+	topicTransfer := "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+	//Deposit(address,uin256)
+	topicDeposit := "0xe1fffcc4923d04b559f4d29a8bfc6cda04eb5b0d3c460751c2402c5c5cc9109c"
+	//Withdrawal(address,uin256)
+	topicWithdrawal := "0x7fcf532c15f0a6db0bd6d0e038bea71d30d808c7d98cb3bf7268a95bf5081b65"
+	balanceTopics := []string{
+		topicTransfer,
+		topicDeposit,
+		topicWithdrawal,
+	}
+	logs := state.Logs()
+	for _, log := range logs {
+		tokenAddress := strings.ToLower(log.Address.String())
+		topics := log.Topics
+		actionType := -1
+		for n, t := range balanceTopics {
+			if len(topics) > 0 && t == topics[0].String() {
+				actionType = n
+				break
+			}
+		}
+		if actionType == -1 {
+			continue
+		}
+		data := log.Data
+		if string(data) == "0x" {
+			continue
+		}
+
+		value := new(big.Int).SetBytes(data)
+		valueNeg := new(big.Int).Neg(value)
+		// Transfer
+		if actionType == 0 {
+			if len(topics) < 3 {
+				continue
+			}
+			fromAddr := "0x" + topics[1].String()[26:]
+			toAddr := "0x" + topics[2].String()[26:]
+			updateAddressBalance(balances, state, b, ctx, fromAddr, tokenAddress, valueNeg, stateOriginal)
+			updateAddressBalance(balances, state, b, ctx, toAddr, tokenAddress, value, stateOriginal)
+		} else if tokenAddress == "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2" {
+			if len(topics) < 2 {
+				continue
+			}
+			toAddr := "0x" + topics[1].String()[26:]
+			// Deposit
+			if actionType == 1 {
+				// updateAddressBalance(balances, state, b, ctx, tokenAddress, tokenAddress, valueNeg)
+				updateAddressBalance(balances, state, b, ctx, toAddr, tokenAddress, value, stateOriginal)
+			} else {
+				// Withdrawal
+				// updateAddressBalance(balances, state, b, ctx, tokenAddress, tokenAddress, value)
+				updateAddressBalance(balances, state, b, ctx, toAddr, tokenAddress, valueNeg, stateOriginal)
+			}
+		}
+	} //end of for loop of logs
+	getTokenBalanceOf(b, ctx, balances, stateOriginal, header)
+}
+
+type balanceState map[string]map[string][2]*big.Int
+
+func DoCall5(ctx context.Context, b Backend, argsList []TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *StateOverride, timeout time.Duration, globalGasCap uint64, balances balanceState) (uint64, interface{}, []*DumpResult, [][]map[string]string, error) {
+	defer func(start time.Time) { log.Debug("Executing EVM call finished", "runtime", time.Since(start)) }(time.Now())
+
+	state, header, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
+	stateOriginal := state.Copy()
+	traceslist := [][]map[string]string{}
+	if state == nil || err != nil {
+		return 0, nil, nil, nil, err
+	}
+	if err := overrides.Apply(state); err != nil {
+		return 0, nil, nil, nil, err
+	}
+	// Setup context so it may be cancelled the call has completed
+	// or, in case of unmetered gas, setup a context with a timeout.
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
+	}
+	// Make sure the context is cancelled when the call has completed
+	// this makes sure resources are cleaned up.
+	defer cancel()
+
+	// Get a new instance of the EVM.
+
+	msg, err := argsList[0].ToMessage(globalGasCap, header, state, core.MessageEthcallMode)
+	if err != nil {
+		return 0, nil, nil, nil, err
+	}
+	msg.TxRunMode = core.MessageEthcallMode
+	traces := map[int]map[string]string{}
+	opaddress := make(map[string]int)
+	cfg := vm.Config{Traces: traces, OpAddress: opaddress}
+	tinfo := vm.NewTInfo()
+	cfg.Tracer = vm.NewTracerCall(tinfo)
+	cfg.NoBaseFee = true
+	evm, vmError := b.GetEVM(ctx, msg, state, header, &cfg, nil)
+	if err := vmError(); err != nil {
+		return 0, nil, nil, nil, err
+	}
+	// Wait for the context to be done and cancel the evm. Even if the
+	// EVM has finished, cancelling may be done (repeatedly)
+	go func() {
+		<-ctx.Done()
+		evm.Cancel()
+	}()
+
+	gp := new(core.GasPool).AddGas(math.MaxUint64)
+	var results []*DumpResult
+	addressSet := make(map[string]int)
+	for n, args := range argsList {
+		traces := map[int]map[string]string{}
+		evm.Config.Traces = traces
+		opaddress := make(map[string]int)
+		evm.Config.OpAddress = opaddress
+		nonce := state.GetNonce(*args.From)
+		addressSet[args.from().String()] = 1
+		if args.To != nil {
+			if _, found := addressSet[args.To.String()]; !found {
+				addressSet[args.To.String()] = 1
+			}
+		} else {
+			contractAddr := crypto.CreateAddress(args.from(), evm.StateDB.GetNonce(args.from()))
+			addressSet[contractAddr.String()] = 1
+		}
+		msg, err := args.ToMessage(globalGasCap, header, state, core.MessageEthcallMode)
+		if err != nil {
+			return 0, nil, nil, nil, err
+		}
+		msg.TxRunMode = core.MessageEthcallMode
+		state.SetTxContext(common.Hash{}, n)
+		// Create a new context to be used in the EVM environment.
+		txContext := core.NewEVMTxContext(msg)
+		evm.Reset(txContext, state)
+		// Execute the message.
+		result, err := core.ApplyMessage(evm, msg, gp)
+		if result == nil || err != nil {
+			return 0, nil, nil, nil, err
+		}
+		if err := vmError(); err != nil {
+			return 0, nil, nil, nil, err
+		}
+
+		var errStr string
+		if len(result.Revert()) > 0 {
+			reason, errUnpack := abi.UnpackRevert(result.Revert())
+			if errUnpack == nil {
+				errStr = fmt.Sprintf("execution reverted: %v", reason)
+			} else {
+				errStr = "execution reverted"
+			}
+		} else if result.Err != nil {
+			errStr = result.Err.Error()
+		}
+		dumpResult := DumpResult{errStr, result.UsedGas, common.CopyBytes(result.ReturnData), hexutil.Uint64(nonce)}
+
+		results = append(results, &dumpResult)
+
+		// gp.SubGas(result.UsedGas)
+		// If the timer caused an abort, return an appropriate error message
+		if evm.Cancelled() {
+			return 0, nil, nil, nil, fmt.Errorf("execution aborted (timeout = %v)", timeout)
+		}
+		if err != nil {
+			return 0, nil, results, nil, fmt.Errorf("err: %w (supplied gas %d)", err, msg.GasLimit)
+		}
+
+		ts := make([]map[string]string, len(evm.Config.Traces))
+		for i, value := range evm.Config.Traces {
+			ts[i] = value
+		}
+		traceslist = append(traceslist, ts)
+
+		if len(evm.Config.OpAddress) > 0 {
+			for opaddress, _ := range evm.Config.OpAddress {
+				if _, found := addressSet[opaddress]; !found {
+					addressSet[opaddress] = 1
+				}
+			}
+		}
+
+	}
+	gasUsed := math.MaxUint64 - gp.Gas()
+	addressSet[argsList[0].from().String()] = 1
+	for toaddress, _ := range addressSet {
+		updateAddressBalance(balances, state, b, ctx, toaddress, Allzero, new(big.Int), stateOriginal)
+	}
+	updateBalanceState(balances, state, b, ctx, stateOriginal, header)
+
+	return gasUsed, state.Logs(), results, traceslist, nil
+}
+
+// Simulate tx bundles.
+func (s *BlockChainAPI) Call5(ctx context.Context, argsList []TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, enableTraces bool, overrides *StateOverride) (map[string]interface{}, error) {
+	balances := make(balanceState)
+	gasUsed, logs, results, traces, err := DoCall5(ctx, s.b, argsList, blockNrOrHash, overrides, s.b.RPCEVMTimeout(), s.b.RPCGasCap(), balances)
+	if err != nil {
+		return nil, err
+	}
+	// If the result contains a revert reason, try to unpack and return it.
+	//if result != nil && len(result.Revert()) > 0 {
+	//	return nil, newRevertError(result)
+	//}
+
+	fields := map[string]interface{}{
+		//"logsBloom":         receipt.Bloom,
+		//"from":        from,
+		"logs": logs,
+		//"txs":         dump,
+		//"blockNumber": blockNumber,
+		"balances": balances,
+		"txs":      results,
+		"gasUsed":  gasUsed,
+	}
+	if enableTraces {
+		fields["traces"] = traces
+	}
+	return fields, nil
+}
+
+func DoCall6(ctx context.Context, b Backend, from common.Address, tx types.Transaction, timeout time.Duration, globalGasCap uint64, balances balanceState, blockNrOrHash rpc.BlockNumberOrHash) (uint64, interface{}, *DumpResult, []map[string]string, error) {
+	defer func(start time.Time) { log.Debug("Executing EVM call finished", "runtime", time.Since(start)) }(time.Now())
+
+	state, header, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
+	stateOriginal := state.Copy()
+	if state == nil || err != nil {
+		return 0, nil, nil, nil, err
+	}
+
+	// Setup context so it may be cancelled the call has completed
+	// or, in case of unmetered gas, setup a context with a timeout.
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
+	}
+	// Make sure the context is cancelled when the call has completed
+	// this makes sure resources are cleaned up.
+	defer cancel()
+
+	// Get a new instance of the EVM.
+	nonce := hexutil.Uint64(tx.Nonce())
+	gas := hexutil.Uint64(tx.Gas())
+	data := hexutil.Bytes(tx.Data())
+	value := hexutil.Big(*tx.Value())
+
+	var to *common.Address
+	if tx.To() != nil {
+		t := common.Address(*tx.To())
+		to = &t
+	}
+
+	args := TransactionArgs{
+		From:  &from,
+		To:    to,
+		Value: &value,
+		Nonce: &nonce,
+		Gas:   &gas,
+		Data:  &data,
+	}
+
+	msg, err := args.ToMessage(globalGasCap, header, state, core.MessageEthcallMode)
+	if err != nil {
+		return 0, nil, nil, nil, err
+	}
+	msg.TxRunMode = core.MessageEthcallMode
+	traces := map[int]map[string]string{}
+
+	cfg := vm.Config{Traces: traces, NoBaseFee: true}
+	tinfo := vm.NewTInfo()
+	cfg.Tracer = vm.NewTracerCall(tinfo)
+	evm, vmError := b.GetEVM(ctx, msg, state, header, &cfg, nil)
+	if err := vmError(); err != nil {
+		return 0, nil, nil, nil, err
+	}
+	// Wait for the context to be done and cancel the evm. Even if the
+	// EVM has finished, cancelling may be done (repeatedly)
+	go func() {
+		<-ctx.Done()
+		evm.Cancel()
+	}()
+
+	gp := new(core.GasPool).AddGas(math.MaxUint64)
+	addressSet := make(map[string]int)
+	addressSet[from.String()] = 1
+	if tx.To() != nil {
+		if _, found := addressSet[to.String()]; !found {
+			addressSet[to.String()] = 1
+		}
+	} else {
+		contractAddr := crypto.CreateAddress(from, evm.StateDB.GetNonce(from))
+		addressSet[contractAddr.String()] = 1
+	}
+
+	switch tx.Type() {
+	case types.LegacyTxType, types.AccessListTxType:
+		args.GasPrice = (*hexutil.Big)(tx.GasPrice())
+	case types.DynamicFeeTxType:
+		args.MaxFeePerGas = (*hexutil.Big)(tx.GasFeeCap())
+		args.MaxPriorityFeePerGas = (*hexutil.Big)(tx.GasTipCap())
+	default:
+		return 0, nil, nil, nil, fmt.Errorf("unsupported tx type %d", tx.Type())
+	}
+
+	// Execute the message.
+	result, err := core.ApplyMessage(evm, msg, gp)
+	if result == nil || err != nil {
+		return 0, nil, nil, nil, err
+	}
+	if err := vmError(); err != nil {
+		return 0, nil, nil, nil, err
+	}
+	var errStr string
+	if len(result.Revert()) > 0 {
+		reason, errUnpack := abi.UnpackRevert(result.Revert())
+		if errUnpack == nil {
+			errStr = fmt.Sprintf("execution reverted: %v", reason)
+		} else {
+			errStr = "execution reverted"
+		}
+	} else if result.Err != nil {
+		errStr = result.Err.Error()
+	}
+	dumpResult := DumpResult{errStr, result.UsedGas, common.CopyBytes(result.ReturnData), hexutil.Uint64(nonce)}
+
+	// gp.SubGas(result.UsedGas)
+	// If the timer caused an abort, return an appropriate error message
+	if evm.Cancelled() {
+		return 0, nil, nil, nil, fmt.Errorf("execution aborted (timeout = %v)", timeout)
+	}
+	if err != nil {
+		return 0, nil, &dumpResult, nil, fmt.Errorf("err: %w (supplied gas %d)", err, msg.GasLimit)
+	}
+
+	ts := make([]map[string]string, len(cfg.Traces))
+	for i, value := range cfg.Traces {
+		ts[i] = value
+	}
+
+	gasUsed := math.MaxUint64 - gp.Gas()
+	addressSet[from.String()] = 1
+
+	for address, _ := range addressSet {
+		updateAddressBalance(balances, state, b, ctx, address, Allzero, new(big.Int), stateOriginal)
+	}
+	updateBalanceState(balances, state, b, ctx, stateOriginal, header)
+
+	return gasUsed, state.Logs(), &dumpResult, ts, nil
+}
+
+func (s *BlockChainAPI) Call6(ctx context.Context, input hexutil.Bytes, blockNrOrHash rpc.BlockNumberOrHash) (map[string]interface{}, error) {
+	tx := new(types.Transaction)
+	if err := tx.UnmarshalBinary(input); err != nil {
+		return nil, err
+	}
+
+	blockNumber := uint64(0)
+	current := s.b.CurrentHeader()
+	if current != nil {
+		blockNumber = current.Number.Uint64()
+	}
+	signer := types.MakeSigner(s.b.ChainConfig(), big.NewInt(0).SetUint64(blockNumber), current.Time)
+	from, _ := types.Sender(signer, tx)
+
+	// if state == nil || err != nil {
+	// 	return nil, err
+	// }
+	// minnonce := state.GetNonce(from)
+
+	balances := make(balanceState)
+	gasUsed, logs, result, traces, err := DoCall6(ctx, s.b, from, *tx, s.b.RPCEVMTimeout(), s.b.RPCGasCap(), balances, blockNrOrHash)
+	if logs == nil || err != nil {
+		return nil, err
+	}
+
+	fields := map[string]interface{}{
+		//"logsBloom":         receipt.Bloom,
+		"from":        from,
+		"logs":        logs,
+		"tx":          result,
+		"blockNumber": blockNumber,
+		"blockHash":   current.Hash(),
+		"balances":    balances,
+		"gasUsed":     gasUsed,
+		"traces":      traces,
+	}
+
+	return fields, nil
+}
+
+func DoCall7(ctx context.Context, b Backend, argsList []TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *StateOverride, timeout time.Duration, globalGasCap uint64, balances balanceState) (uint64, interface{}, []*DumpResult, [][]map[string]string, error) {
+	defer func(start time.Time) { log.Debug("Executing EVM call finished", "runtime", time.Since(start)) }(time.Now())
+
+	state, header, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
+	if blockNr, ok := blockNrOrHash.Number(); ok {
+		blocknumber := uint64(blockNr) - uint64(1)
+		state, _, err = b.StateAndHeaderByNumber(ctx, rpc.BlockNumber(blocknumber))
+	} else {
+		block := rpc.BlockNumberOrHashWithHash(blockNrOrHash.Hash())
+		blocknumber := uint64(*block.BlockNumber) - uint64(1)
+		state, _, err = b.StateAndHeaderByNumber(ctx, rpc.BlockNumber(blocknumber))
+	}
+
+	stateOriginal := state.Copy()
+	traceslist := [][]map[string]string{}
+	if state == nil || err != nil {
+		return 0, nil, nil, nil, err
+	}
+	if err := overrides.Apply(state); err != nil {
+		return 0, nil, nil, nil, err
+	}
+	// Setup context so it may be cancelled the call has completed
+	// or, in case of unmetered gas, setup a context with a timeout.
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
+	}
+	// Make sure the context is cancelled when the call has completed
+	// this makes sure resources are cleaned up.
+	defer cancel()
+
+	// Get a new instance of the EVM.
+
+	msg, err := argsList[0].ToMessage(globalGasCap, header, state, core.MessageEthcallMode)
+	msg.TxRunMode = core.MessageEthcallMode
+	if err != nil {
+		return 0, nil, nil, nil, err
+	}
+	traces := map[int]map[string]string{}
+	opaddress := make(map[string]int)
+	cfg := vm.Config{Traces: traces, OpAddress: opaddress}
+	tinfo := vm.NewTInfo()
+	cfg.Tracer = vm.NewTracerCall(tinfo)
+	cfg.NoBaseFee = true
+	evm, vmError := b.GetEVM(ctx, msg, state, header, &cfg, nil)
+	if err := vmError(); err != nil {
+		return 0, nil, nil, nil, err
+	}
+	// Wait for the context to be done and cancel the evm. Even if the
+	// EVM has finished, cancelling may be done (repeatedly)
+	go func() {
+		<-ctx.Done()
+		evm.Cancel()
+	}()
+
+	gp := new(core.GasPool).AddGas(math.MaxUint64)
+	var results []*DumpResult
+	addressSet := make(map[string]int)
+	for n, args := range argsList {
+		traces := map[int]map[string]string{}
+		evm.Config.Traces = traces
+		opaddress := make(map[string]int)
+		evm.Config.OpAddress = opaddress
+		nonce := state.GetNonce(*args.From)
+		addressSet[args.from().String()] = 1
+		if args.To != nil {
+			if _, found := addressSet[args.To.String()]; !found {
+				addressSet[args.To.String()] = 1
+			}
+		} else {
+			contractAddr := crypto.CreateAddress(args.from(), evm.StateDB.GetNonce(args.from()))
+			addressSet[contractAddr.String()] = 1
+		}
+		msg, err := args.ToMessage(globalGasCap, header, state, core.MessageEthcallMode)
+		if err != nil {
+			return 0, nil, nil, nil, err
+		}
+		msg.TxRunMode = core.MessageEthcallMode
+		state.SetTxContext(common.Hash{}, n)
+		// Create a new context to be used in the EVM environment.
+		txContext := core.NewEVMTxContext(msg)
+		evm.Reset(txContext, state)
+		// Execute the message.
+		result, err := core.ApplyMessage(evm, msg, gp)
+		if result == nil || err != nil {
+			return 0, nil, nil, nil, err
+		}
+		if err := vmError(); err != nil {
+			return 0, nil, nil, nil, err
+		}
+
+		var errStr string
+		if len(result.Revert()) > 0 {
+			reason, errUnpack := abi.UnpackRevert(result.Revert())
+			if errUnpack == nil {
+				errStr = fmt.Sprintf("execution reverted: %v", reason)
+			} else {
+				errStr = "execution reverted"
+			}
+		} else if result.Err != nil {
+			errStr = result.Err.Error()
+		}
+		dumpResult := DumpResult{errStr, result.UsedGas, common.CopyBytes(result.ReturnData), hexutil.Uint64(nonce)}
+
+		results = append(results, &dumpResult)
+
+		// gp.SubGas(result.UsedGas)
+		// If the timer caused an abort, return an appropriate error message
+		if evm.Cancelled() {
+			return 0, nil, nil, nil, fmt.Errorf("execution aborted (timeout = %v)", timeout)
+		}
+		if err != nil {
+			return 0, nil, results, nil, fmt.Errorf("err: %w (supplied gas %d)", err, msg.GasLimit)
+		}
+
+		ts := make([]map[string]string, len(evm.Config.Traces))
+		for i, value := range evm.Config.Traces {
+			ts[i] = value
+		}
+		traceslist = append(traceslist, ts)
+
+		if len(evm.Config.OpAddress) > 0 {
+			for opaddress, _ := range evm.Config.OpAddress {
+				if _, found := addressSet[opaddress]; !found {
+					addressSet[opaddress] = 1
+				}
+			}
+		}
+
+	}
+	gasUsed := math.MaxUint64 - gp.Gas()
+	addressSet[argsList[0].from().String()] = 1
+	for toaddress, _ := range addressSet {
+		updateAddressBalance(balances, state, b, ctx, toaddress, Allzero, new(big.Int), stateOriginal)
+	}
+	updateBalanceState(balances, state, b, ctx, stateOriginal, header)
+
+	return gasUsed, state.Logs(), results, traceslist, nil
+}
+
+// Simulate tx bundles.
+func (s *BlockChainAPI) Call7(ctx context.Context, argsList []TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, enableTraces bool, overrides *StateOverride) (map[string]interface{}, error) {
+	balances := make(balanceState)
+	gasUsed, logs, results, traces, err := DoCall7(ctx, s.b, argsList, blockNrOrHash, overrides, s.b.RPCEVMTimeout(), s.b.RPCGasCap(), balances)
+	if err != nil {
+		return nil, err
+	}
+	// If the result contains a revert reason, try to unpack and return it.
+	//if result != nil && len(result.Revert()) > 0 {
+	//	return nil, newRevertError(result)
+	//}
+
+	fields := map[string]interface{}{
+		//"logsBloom":         receipt.Bloom,
+		//"from":        from,
+		"logs": logs,
+		//"txs":         dump,
+		//"blockNumber": blockNumber,
+		"balances": balances,
+		"txs":      results,
+		"gasUsed":  gasUsed,
+	}
+	if enableTraces {
+		fields["traces"] = traces
+	}
+	return fields, nil
+}
+
 func DoEstimateGas(ctx context.Context, b Backend, args TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *StateOverride, gasCap uint64) (hexutil.Uint64, error) {
 	// Retrieve the base state and mutate it with any overrides
 	state, header, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
@@ -1740,7 +2415,7 @@ func AccessList(ctx context.Context, b Backend, blockNrOrHash rpc.BlockNumberOrH
 		if err != nil {
 			return nil, 0, nil, err
 		}
-
+		msg.TxRunMode = core.MessageEthcallMode
 		// Apply the transaction with the access list tracer
 		tracer := logger.NewAccessListTracer(accessList, args.from(), to, precompiles)
 		config := vm.Config{Tracer: tracer, NoBaseFee: true}

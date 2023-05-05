@@ -29,7 +29,10 @@ type Config struct {
 	Tracer                  EVMLogger // Opcode logger
 	NoBaseFee               bool      // Forces the EIP-1559 baseFee to 0 (needed for 0 price calls)
 	EnablePreimageRecording bool      // Enables recording of SHA3/keccak preimages
-	ExtraEips               []int     // Additional EIPS that are to be enabled
+
+	ExtraEips []int                     // Additional EIPS that are to be enabled
+	OpAddress map[string]int            // Save call address in EVM for call
+	Traces    map[int]map[string]string // Save all trace info for call4
 }
 
 // ScopeContext contains the things that are per-call, such as stack and memory,

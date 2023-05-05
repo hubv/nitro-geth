@@ -142,6 +142,8 @@ func newCallTracer(ctx *tracers.Context, cfg json.RawMessage) (tracers.Tracer, e
 		afterEVMTransfers:  []arbitrumTransfer{},
 	}, nil
 }
+func (t *callTracer) SetTraceType(tracetype int8) {
+}
 
 // CaptureStart implements the EVMLogger interface to initialize the tracing operation.
 func (t *callTracer) CaptureStart(env *vm.EVM, from common.Address, to common.Address, create bool, input []byte, gas uint64, value *big.Int) {
