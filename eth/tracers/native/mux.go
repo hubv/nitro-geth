@@ -160,3 +160,6 @@ func (t *muxTracer) Stop(err error) {
 		t.Stop(err)
 	}
 }
+
+func (t *muxTracer) SetTraceType(tracetype int8) {
+}
