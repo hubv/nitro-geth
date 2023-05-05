@@ -90,6 +90,12 @@ func (t *fourByteTracer) CaptureStart(env *vm.EVM, from common.Address, to commo
 	}
 }
 
+// CaptureState implements the EVMLogger interface to trace a single step of VM execution.
+func (t *fourByteTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, scope *vm.ScopeContext, rData []byte, depth int, err error) {
+}
+func (t *fourByteTracer) SetTraceType(tracetype int8) {
+}
+
 // CaptureEnter is called when EVM enters a new scope (via call, create or selfdestruct).
 func (t *fourByteTracer) CaptureEnter(op vm.OpCode, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
 	// Skip if tracing was interrupted

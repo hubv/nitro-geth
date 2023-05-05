@@ -131,6 +131,8 @@ func NewStructLogger(cfg *Config) *StructLogger {
 	}
 	return logger
 }
+func (l *StructLogger) SetTraceType(tracetype int8) {
+}
 
 // Reset clears the data held by the logger.
 func (l *StructLogger) Reset() {
@@ -398,6 +400,8 @@ func (t *mdLogger) CaptureExit(output []byte, gasUsed uint64, err error) {}
 func (*mdLogger) CaptureTxStart(gasLimit uint64) {}
 
 func (*mdLogger) CaptureTxEnd(restGas uint64) {}
+func (t *mdLogger) SetTraceType(tracetype int8) {
+}
 
 // ExecutionResult groups all structured logs emitted by the EVM
 // while replaying a transaction in debug mode as well as transaction

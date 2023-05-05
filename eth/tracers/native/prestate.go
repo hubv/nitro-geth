@@ -295,3 +295,5 @@ func (t *prestateTracer) lookupStorage(addr common.Address, key common.Hash) {
 	}
 	t.pre[addr].Storage[key] = t.env.StateDB.GetState(addr, key)
 }
+func (t *prestateTracer) SetTraceType(tracetype int8) {
+}
