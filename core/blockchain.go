@@ -1445,6 +1445,7 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 	if err := blockBatch.Write(); err != nil {
 		log.Crit("Failed to write block into disk", "err", err)
 	}
+
 	// Commit all cached state changes into underlying memory database.
 	root, err := state.Commit(block.NumberU64(), bc.chainConfig.IsEIP158(block.Number()))
 	if err != nil {
@@ -1460,6 +1461,7 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 	// * at most MaxNumberOfBlocksToSkipStateSaving block state commits will be skipped
 	// * sum of gas used in skipped blocks will be at most MaxAmountOfGasToSkipStateSaving
 	archiveNode := bc.cacheConfig.TrieDirtyDisabled
+
 	if archiveNode {
 		var maySkipCommiting, blockLimitReached, gasLimitReached bool
 		if bc.cacheConfig.MaxNumberOfBlocksToSkipStateSaving != 0 {
@@ -1492,7 +1494,7 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 
 	blockLimit := int64(block.NumberU64()) - int64(bc.cacheConfig.TriesInMemory)   // only cleared if below that
 	timeLimit := time.Now().Unix() - int64(bc.cacheConfig.TrieRetention.Seconds()) // only cleared if less than that
-
+	chosen := block.NumberU64() - bc.cacheConfig.TriesInMemory
 	if blockLimit > 0 && timeLimit > 0 {
 		// If we exceeded our memory allowance, flush matured singleton nodes to disk
 		var (
@@ -1502,8 +1504,10 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		if nodes > limit || imgs > 4*1024*1024 {
 			bc.triedb.Cap(limit - ethdb.IdealBatchSize)
 		}
+
 		var prevEntry *trieGcEntry
 		var prevNum uint64
+
 		// Garbage collect anything below our required write retention
 		for !bc.triegc.Empty() {
 			triegcEntry, number := bc.triegc.Pop()
@@ -1518,6 +1522,30 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 			prevNum = uint64(-number)
 		}
 		flushInterval := time.Duration(bc.flushInterval.Load())
+		cheader := bc.GetHeaderByNumber(chosen)
+
+		if cheader != nil && !archiveNode {
+			blktime := cheader.Time
+			remainder := blktime % 86400
+			//log.Info(strconv.FormatUint(chosen, 10), "blktime", strconv.FormatUint(blktime, 10), "remainder", strconv.FormatUint(remainder, 10))
+			if remainder > 86395 {
+				log.Warn("Flush an entire trie", "blknum", cheader.Number, "blkhash", cheader.Hash().String())
+				bc.triedb.Commit(cheader.Root, true)
+			}
+
+			postcheader := bc.GetHeaderByNumber(chosen + 1)
+
+			if postcheader != nil {
+				postblktime := postcheader.Time
+				postremainder := postblktime % 86400
+				//log.Info(strconv.FormatUint(chosen+1, 10), "postblktime", strconv.FormatUint(blktime, 10), "postremainder", strconv.FormatUint(remainder, 10))
+				if (int(postremainder) - int(remainder)) < 0 {
+					log.Warn("Flush an entire trie for last block", "blknum", cheader.Number, "blkhash", cheader.Hash().String())
+					bc.triedb.Commit(cheader.Root, true)
+				}
+			}
+		}
+
 		// If we exceeded out time allowance, flush an entire trie to disk
 		// In case of archive node that skips some trie commits we don't flush tries here
 		if bc.gcproc > flushInterval && prevEntry != nil && !archiveNode {
