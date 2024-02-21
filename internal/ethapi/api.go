@@ -27,6 +27,7 @@ import (
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/ethereum/go-ethereum/accounts"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/accounts/scwallet"
 	"github.com/ethereum/go-ethereum/common"
@@ -1287,10 +1288,7 @@ func getTokenBalanceOf(backend Backend, ctx context.Context, balances balanceSta
 		return err
 	}
 	msg.TxRunMode = core.MessageEthcallMode
-	evm, vmError := backend.GetEVM(ctx, msg, stateOriginal, header, &vm.Config{NoBaseFee: true}, nil)
-	if err := vmError(); err != nil {
-		return err
-	}
+	evm := backend.GetEVM(ctx, msg, stateOriginal, header, &vm.Config{NoBaseFee: true}, nil)
 
 	// Execute the message.
 	gp := new(core.GasPool).AddGas(math.MaxUint64)
@@ -1357,8 +1355,8 @@ func updateAddressBalance(balances balanceState, state *state.StateDB, backend B
 			tbc[tokenAddr] = bc
 		}
 		//First entry for Addr, add native token balance
-		b1 := state.GetBalance(common.HexToAddress(addr))
-		b2 := stateOriginal.GetBalance(common.HexToAddress(addr))
+		b1 := state.GetBalance(common.HexToAddress(addr)).ToBig()
+		b2 := stateOriginal.GetBalance(common.HexToAddress(addr)).ToBig()
 		bc1 := [2]*big.Int{b2, new(big.Int).Sub(b1, b2)}
 		tbc[Allzero] = bc1
 		balances[addr] = tbc
@@ -1407,7 +1405,7 @@ func updateBalanceState(balances balanceState, state *state.StateDB, b Backend, 
 			toAddr := "0x" + topics[2].String()[26:]
 			updateAddressBalance(balances, state, b, ctx, fromAddr, tokenAddress, valueNeg, stateOriginal)
 			updateAddressBalance(balances, state, b, ctx, toAddr, tokenAddress, value, stateOriginal)
-		} else if tokenAddress == "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2" {
+		} else if tokenAddress == "0x82af49447d8a07e3bd95bd0d56f35241523fbab1" {
 			if len(topics) < 2 {
 				continue
 			}
@@ -1465,10 +1463,7 @@ func DoCall5(ctx context.Context, b Backend, argsList []TransactionArgs, blockNr
 	tinfo := vm.NewTInfo()
 	cfg.Tracer = vm.NewTracerCall(tinfo)
 	cfg.NoBaseFee = true
-	evm, vmError := b.GetEVM(ctx, msg, state, header, &cfg, nil)
-	if err := vmError(); err != nil {
-		return 0, nil, nil, nil, err
-	}
+	evm := b.GetEVM(ctx, msg, state, header, &cfg, nil)
 	// Wait for the context to be done and cancel the evm. Even if the
 	// EVM has finished, cancelling may be done (repeatedly)
 	go func() {
@@ -1506,9 +1501,6 @@ func DoCall5(ctx context.Context, b Backend, argsList []TransactionArgs, blockNr
 		// Execute the message.
 		result, err := core.ApplyMessage(evm, msg, gp)
 		if result == nil || err != nil {
-			return 0, nil, nil, nil, err
-		}
-		if err := vmError(); err != nil {
 			return 0, nil, nil, nil, err
 		}
 
@@ -1641,10 +1633,8 @@ func DoCall6(ctx context.Context, b Backend, from common.Address, tx types.Trans
 	cfg := vm.Config{Traces: traces, NoBaseFee: true}
 	tinfo := vm.NewTInfo()
 	cfg.Tracer = vm.NewTracerCall(tinfo)
-	evm, vmError := b.GetEVM(ctx, msg, state, header, &cfg, nil)
-	if err := vmError(); err != nil {
-		return 0, nil, nil, nil, err
-	}
+	evm := b.GetEVM(ctx, msg, state, header, &cfg, nil)
+
 	// Wait for the context to be done and cancel the evm. Even if the
 	// EVM has finished, cancelling may be done (repeatedly)
 	go func() {
@@ -1677,9 +1667,6 @@ func DoCall6(ctx context.Context, b Backend, from common.Address, tx types.Trans
 	// Execute the message.
 	result, err := core.ApplyMessage(evm, msg, gp)
 	if result == nil || err != nil {
-		return 0, nil, nil, nil, err
-	}
-	if err := vmError(); err != nil {
 		return 0, nil, nil, nil, err
 	}
 	var errStr string
@@ -1806,10 +1793,8 @@ func DoCall7(ctx context.Context, b Backend, argsList []TransactionArgs, blockNr
 	tinfo := vm.NewTInfo()
 	cfg.Tracer = vm.NewTracerCall(tinfo)
 	cfg.NoBaseFee = true
-	evm, vmError := b.GetEVM(ctx, msg, state, header, &cfg, nil)
-	if err := vmError(); err != nil {
-		return 0, nil, nil, nil, err
-	}
+	evm := b.GetEVM(ctx, msg, state, header, &cfg, nil)
+
 	// Wait for the context to be done and cancel the evm. Even if the
 	// EVM has finished, cancelling may be done (repeatedly)
 	go func() {
@@ -1847,9 +1832,6 @@ func DoCall7(ctx context.Context, b Backend, argsList []TransactionArgs, blockNr
 		// Execute the message.
 		result, err := core.ApplyMessage(evm, msg, gp)
 		if result == nil || err != nil {
-			return 0, nil, nil, nil, err
-		}
-		if err := vmError(); err != nil {
 			return 0, nil, nil, nil, err
 		}
 

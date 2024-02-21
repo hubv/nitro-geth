@@ -163,6 +163,7 @@ type TracerCall interface {
 	CaptureArbitrumTransfer(env *EVM, from, to *common.Address, value *big.Int, before bool, purpose string)
 	CaptureArbitrumStorageGet(key common.Hash, depth int, before bool)
 	CaptureArbitrumStorageSet(key, value common.Hash, depth int, before bool)
+	CaptureStylusHostio(name string, args, outs []byte, startInk, endInk uint64)
 }
 
 func (t *TracerCall4) CaptureTxStart(gasLimit uint64) {
@@ -273,3 +274,4 @@ func (t *TracerCall4) CaptureArbitrumTransfer(
 	env *EVM, from, to *common.Address, value *big.Int, before bool, purpose string,
 ) {
 }
+func (t *TracerCall4) CaptureStylusHostio(name string, args, outs []byte, startInk, endInk uint64) {}
