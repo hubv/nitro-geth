@@ -18,12 +18,16 @@
 package core
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"math/big"
+	"os"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1445,6 +1449,73 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 	if err := blockBatch.Write(); err != nil {
 		log.Crit("Failed to write block into disk", "err", err)
 	}
+
+	if block.Bloom().Big().String() != "0" {
+
+		t := time.Unix(int64(block.Time()), 0)
+		day := t.UTC().Format("2006-01-02")
+		blknum := block.Number().String()
+		hash_prefix := block.Hash().String()
+		path := "/data01/full_node/events2"
+		txfile := fmt.Sprintf("%s_%s.csv", blknum, hash_prefix[2:8])
+		subpath := filepath.Join(path, day, strconv.Itoa(t.UTC().Hour()))
+		if _, err2 := os.Stat(subpath); os.IsNotExist(err2) {
+			err2 = os.MkdirAll(subpath, os.ModePerm)
+			if err2 != nil {
+				fmt.Printf("failed creating subpath: %s", err2)
+			}
+		}
+		file, err := os.OpenFile(filepath.Join(subpath, txfile), os.O_WRONLY|os.O_CREATE, 0644)
+
+		if err != nil {
+			fmt.Printf("failed creating file: %s", err)
+			file = nil
+		}
+		datawriter := bufio.NewWriter(file)
+
+		for _, re := range receipts {
+			txhash := re.TxHash.Hex()
+			tx := block.Transaction(re.TxHash)
+			signer := types.MakeSigner(bc.Config(), block.Number(), block.Time())
+			sender, _ := types.Sender(signer, tx)
+			from := sender.Hex()
+			to := ""
+			if tx.To() != nil {
+				to = tx.To().Hex()
+			}
+
+			for _, log := range re.Logs {
+				var Topics []string
+				topic0 := ""
+				for i, topic := range log.Topics {
+					Topics = append(Topics, topic.Hex())
+					if i == 0 {
+						topic0 = topic.Hex()
+					}
+				}
+				loginfo := []string{strconv.FormatUint(block.Time(), 10),
+					day,
+					block.Hash().Hex(),
+					blknum,
+					txhash,
+					strconv.FormatUint(uint64(re.TransactionIndex), 10),
+					strings.ToLower(from),
+					strings.ToLower(to),
+					strconv.FormatUint(uint64(log.Index), 10),
+					strings.ToLower(log.Address.Hex()),
+					"0x" + strings.ToLower(common.Bytes2Hex(log.Data)),
+					strconv.Itoa(len(Topics)),
+					topic0,
+					"[" + strings.Join(Topics, ",") + "]",
+					"0",
+					"0",
+				}
+				_, _ = datawriter.WriteString(strings.Join(loginfo, "^") + "\n")
+			}
+		}
+		datawriter.Flush()
+	}
+
 	// Commit all cached state changes into underlying memory database.
 	root, err := state.Commit(block.NumberU64(), bc.chainConfig.IsEIP158(block.Number()))
 	if err != nil {
@@ -1460,6 +1531,7 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 	// * at most MaxNumberOfBlocksToSkipStateSaving block state commits will be skipped
 	// * sum of gas used in skipped blocks will be at most MaxAmountOfGasToSkipStateSaving
 	archiveNode := bc.cacheConfig.TrieDirtyDisabled
+
 	if archiveNode {
 		var maySkipCommiting, blockLimitReached, gasLimitReached bool
 		if bc.cacheConfig.MaxNumberOfBlocksToSkipStateSaving != 0 {
@@ -1492,6 +1564,7 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 
 	blockLimit := int64(block.NumberU64()) - int64(bc.cacheConfig.TriesInMemory)   // only cleared if below that
 	timeLimit := time.Now().Unix() - int64(bc.cacheConfig.TrieRetention.Seconds()) // only cleared if less than that
+	chosen := block.NumberU64() - bc.cacheConfig.TriesInMemory
 
 	if blockLimit > 0 && timeLimit > 0 {
 		// If we exceeded our memory allowance, flush matured singleton nodes to disk
@@ -1502,8 +1575,10 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		if nodes > limit || imgs > 4*1024*1024 {
 			bc.triedb.Cap(limit - ethdb.IdealBatchSize)
 		}
+
 		var prevEntry *trieGcEntry
 		var prevNum uint64
+
 		// Garbage collect anything below our required write retention
 		for !bc.triegc.Empty() {
 			triegcEntry, number := bc.triegc.Pop()
@@ -1518,6 +1593,30 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 			prevNum = uint64(-number)
 		}
 		flushInterval := time.Duration(bc.flushInterval.Load())
+		cheader := bc.GetHeaderByNumber(chosen)
+
+		if cheader != nil && !archiveNode {
+			blktime := cheader.Time
+			remainder := blktime % 86400
+			//log.Info(strconv.FormatUint(chosen, 10), "blktime", strconv.FormatUint(blktime, 10), "remainder", strconv.FormatUint(remainder, 10))
+			if remainder > 86395 {
+				log.Warn("Flush an entire trie", "blknum", cheader.Number, "blkhash", cheader.Hash().String())
+				bc.triedb.Commit(cheader.Root, true)
+			}
+
+			postcheader := bc.GetHeaderByNumber(chosen + 1)
+
+			if postcheader != nil {
+				postblktime := postcheader.Time
+				postremainder := postblktime % 86400
+				//log.Info(strconv.FormatUint(chosen+1, 10), "postblktime", strconv.FormatUint(blktime, 10), "postremainder", strconv.FormatUint(remainder, 10))
+				if (int(postremainder) - int(remainder)) < 0 {
+					log.Warn("Flush an entire trie for last block", "blknum", cheader.Number, "blkhash", cheader.Hash().String())
+					bc.triedb.Commit(cheader.Root, true)
+				}
+			}
+		}
+
 		// If we exceeded out time allowance, flush an entire trie to disk
 		// In case of archive node that skips some trie commits we don't flush tries here
 		if bc.gcproc > flushInterval && prevEntry != nil && !archiveNode {
