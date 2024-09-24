@@ -66,6 +66,8 @@ func (t *noopTracer) CaptureExit(output []byte, gasUsed uint64, err error) {
 func (*noopTracer) CaptureTxStart(gasLimit uint64) {}
 
 func (*noopTracer) CaptureTxEnd(restGas uint64) {}
+func (t *noopTracer) SetTraceType(tracetype int8) {
+}
 
 // GetResult returns an empty json object.
 func (t *noopTracer) GetResult() (json.RawMessage, error) {

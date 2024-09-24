@@ -237,6 +237,9 @@ func (t *callTracer) CaptureEnter(typ vm.OpCode, from common.Address, to common.
 	t.callstack = append(t.callstack, call)
 }
 
+func (t *callTracer) SetTraceType(tracetype int8) {
+}
+
 // CaptureExit is called when EVM exits a scope, even if the scope didn't
 // execute any code.
 func (t *callTracer) CaptureExit(output []byte, gasUsed uint64, err error) {

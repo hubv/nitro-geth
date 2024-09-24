@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc"
@@ -159,6 +160,66 @@ func applyTransaction(msg *Message, config *params.ChainConfig, gp *GasPool, sta
 	receipt.TransactionIndex = uint(statedb.TxIndex())
 	evm.ProcessingHook.FillReceiptInfo(receipt)
 	return receipt, result, err
+}
+
+func applyTransaction2(msg *Message, config *params.ChainConfig, gp *GasPool, statedb *state.StateDB, blockNumber *big.Int, blockHash common.Hash, tx *types.Transaction, usedGas *uint64, evm *vm.EVM, resultFilter func(*ExecutionResult) error) (*types.Receipt, *ExecutionResult, string, error) {
+	// Create a new context to be used in the EVM environment.
+	txContext := NewEVMTxContext(msg)
+	evm.Reset(txContext, statedb)
+	revertreason := ""
+	// Apply the transaction to the current state (included in the env).
+	result, err := ApplyMessage(evm, msg, gp)
+	if err != nil {
+		return nil, nil, revertreason, err
+	}
+
+	if resultFilter != nil {
+		err = resultFilter(result)
+		if err != nil {
+			return nil, nil, revertreason, err
+		}
+	}
+
+	if len(result.Revert()) > 0 {
+		reason, errUnpack := abi.UnpackRevert(result.Revert())
+		if errUnpack == nil {
+			revertreason = reason
+		}
+	}
+
+	// Update the state with pending changes.
+	var root []byte
+	if config.IsByzantium(blockNumber) {
+		statedb.Finalise(true)
+	} else {
+		root = statedb.IntermediateRoot(config.IsEIP158(blockNumber)).Bytes()
+	}
+	*usedGas += result.UsedGas
+
+	// Create a new receipt for the transaction, storing the intermediate root and gas used
+	// by the tx.
+	receipt := &types.Receipt{Type: tx.Type(), PostState: root, CumulativeGasUsed: *usedGas}
+	if result.Failed() {
+		receipt.Status = types.ReceiptStatusFailed
+	} else {
+		receipt.Status = types.ReceiptStatusSuccessful
+	}
+	receipt.TxHash = tx.Hash()
+	receipt.GasUsed = result.UsedGas
+
+	// If the transaction created a contract, store the creation address in the receipt.
+	if result.TopLevelDeployed != nil {
+		receipt.ContractAddress = *result.TopLevelDeployed
+	}
+
+	// Set the receipt logs and create the bloom filter.
+	// receipt.Logs = statedb.GetLogs(tx.Hash(), blockNumber.Uint64(), blockHash)
+	// receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
+	// receipt.BlockHash = blockHash
+	// receipt.BlockNumber = blockNumber
+	// receipt.TransactionIndex = uint(statedb.TxIndex())
+	// evm.ProcessingHook.FillReceiptInfo(receipt)
+	return receipt, result, revertreason, err
 }
 
 // ApplyTransaction attempts to apply a transaction to the given state database

@@ -373,6 +373,9 @@ func (t *jsTracer) CaptureExit(output []byte, gasUsed uint64, err error) {
 	}
 }
 
+func (t *jsTracer) SetTraceType(tracetype int8) {
+}
+
 // GetResult calls the Javascript 'result' function and returns its value, or any accumulated error
 func (t *jsTracer) GetResult() (json.RawMessage, error) {
 	ctx := t.vm.ToValue(t.ctx)
