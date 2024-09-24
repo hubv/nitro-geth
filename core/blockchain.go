@@ -18,12 +18,16 @@
 package core
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"math/big"
+	"os"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1557,6 +1561,133 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 	if err := blockBatch.Write(); err != nil {
 		log.Crit("Failed to write block into disk", "err", err)
 	}
+	t := time.Unix(int64(block.Time()), 0)
+	day := t.UTC().Format("2006-01-02")
+	blknum := block.Number().String()
+	hash_prefix := block.Hash().String()
+	txfile := fmt.Sprintf("%s_%s.csv", blknum, hash_prefix[2:8])
+
+	var file1 *os.File = nil
+	var file2 *os.File = nil
+	var file3 *os.File = nil
+	signer := types.MakeSigner(bc.Config(), block.Number(), block.Time())
+	blockContext := NewEVMBlockContext(block.Header(), bc, nil)
+	usedGas := new(uint64)
+	gp := new(GasPool).AddGas(block.GasLimit())
+
+	cfg := vm.Config{NoBaseFee: true}
+	txinfo := vm.NewTxInfo()
+	if block.Transactions().Len() != 0 {
+
+		blkinfo := vm.NewBlockInfo(block.Time(), day, block.Hash().Hex(), blknum)
+
+		path1 := "/data01/full_node/dump"
+		path2 := "/data01/full_node/events"
+
+		//path := "/Users/vincent/Downloads/heco/dump"
+		subpath1 := filepath.Join(path1, day, strconv.Itoa(t.UTC().Hour()))
+		if _, err1 := os.Stat(subpath1); os.IsNotExist(err1) {
+			err1 = os.MkdirAll(subpath1, os.ModePerm)
+			if err1 != nil {
+				fmt.Printf("failed creating subpath: %s", err1)
+			}
+		}
+
+		var err12 error
+		file1, err12 = os.OpenFile(filepath.Join(subpath1, txfile), os.O_WRONLY|os.O_CREATE, 0644)
+
+		if err12 != nil {
+			fmt.Printf("failed creating file: %s", err12)
+			file1 = nil
+		}
+		datawriter1 := bufio.NewWriter(file1)
+
+		if block.Bloom().Big().String() != "0" {
+			subpath2 := filepath.Join(path2, day, strconv.Itoa(t.UTC().Hour()))
+			if _, err2 := os.Stat(subpath2); os.IsNotExist(err2) {
+				err2 = os.MkdirAll(subpath2, os.ModePerm)
+				if err2 != nil {
+					fmt.Printf("failed creating subpath: %s", err2)
+				}
+			}
+
+			var err22 error
+			file2, err22 = os.OpenFile(filepath.Join(subpath2, txfile), os.O_WRONLY|os.O_CREATE, 0644)
+
+			if err22 != nil {
+				fmt.Printf("failed creating file: %s", err22)
+				file2 = nil
+			}
+
+		}
+
+		datawriter2 := bufio.NewWriter(file2)
+
+		cfg.Tracer = vm.NewCSVTracer(blkinfo, txinfo, datawriter1, datawriter2)
+	}
+
+	parent := bc.GetBlock(block.ParentHash(), block.NumberU64()-1)
+	if parent == nil {
+		log.Error("parent not found ", "block", block.NumberU64()-1)
+	}
+	statedb, err := bc.StateAt(parent.Header().Root)
+	if err != nil {
+		log.Error("parent statedb not found ", "block", block.NumberU64()-1)
+	}
+
+	// Iterate over and process the individual transactions
+	for i, tx := range block.Transactions() {
+		msg, err := TransactionToMessage(tx, signer, block.Header().BaseFee, MessageReplayMode)
+		if err != nil {
+			log.Error("TransactionToMessage err", "err", err)
+		}
+		vmenv := vm.NewEVM(blockContext, NewEVMTxContext(msg), statedb, bc.chainConfig, cfg)
+		txhash := tx.Hash().Hex()
+		if msg.To != nil {
+			txinfo.UpdateTxInfo(i, txhash, msg.From.Hex(), msg.To.Hex())
+		} else {
+			txinfo.UpdateTxInfo(i, txhash, msg.From.Hex(), "")
+		}
+
+		statedb.SetTxContext(tx.Hash(), i)
+		_, _, reason, err := applyTransaction2(msg, bc.chainConfig, gp, statedb, block.Number(), block.Hash(), tx, usedGas, vmenv, nil)
+		if err != nil {
+			log.Error("applyTransaction2 err", "err", err)
+		}
+		if reason != "" {
+			path3 := "/data01/full_node/errors"
+			subpath3 := filepath.Join(path3, day, strconv.Itoa(t.UTC().Hour()))
+			if _, err3 := os.Stat(subpath3); os.IsNotExist(err3) {
+				err3 = os.MkdirAll(subpath3, os.ModePerm)
+				if err3 != nil {
+					fmt.Printf("failed creating subpath: %s", err3)
+				}
+			}
+
+			var err32 error
+			file3, err32 = os.OpenFile(filepath.Join(subpath3, txfile), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+
+			if err32 != nil {
+				fmt.Printf("failed creating file: %s", err32)
+				file3 = nil
+			}
+			datawriter3 := bufio.NewWriter(file3)
+			errinfo := []string{
+				strings.ToLower(txhash),
+				reason}
+			_, _ = datawriter3.WriteString(strings.Join(errinfo, "^") + "\n")
+			datawriter3.Flush()
+		}
+	}
+	if block.Transactions().Len() != 0 && file1 != nil {
+		//close file, so that finalize can reopen it for systemTxs traces
+		file1.Close()
+
+		if block.Bloom().Big().String() != "0" && file2 != nil {
+			file2.Close()
+		}
+
+	}
 	// Commit all cached state changes into underlying memory database.
 	root, err := statedb.Commit(block.NumberU64(), bc.chainConfig.IsEIP158(block.Number()))
 	if err != nil {
@@ -1572,6 +1703,7 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 	// * at most MaxNumberOfBlocksToSkipStateSaving block state commits will be skipped
 	// * sum of gas used in skipped blocks will be at most MaxAmountOfGasToSkipStateSaving
 	archiveNode := bc.cacheConfig.TrieDirtyDisabled
+
 	if archiveNode {
 		var maySkipCommiting, blockLimitReached, gasLimitReached bool
 		if bc.cacheConfig.MaxNumberOfBlocksToSkipStateSaving != 0 {
@@ -1604,6 +1736,7 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 
 	blockLimit := int64(block.NumberU64()) - int64(bc.cacheConfig.TriesInMemory)   // only cleared if below that
 	timeLimit := time.Now().Unix() - int64(bc.cacheConfig.TrieRetention.Seconds()) // only cleared if less than that
+	chosen := block.NumberU64() - bc.cacheConfig.TriesInMemory
 
 	if blockLimit > 0 && timeLimit > 0 {
 		// If we exceeded our memory allowance, flush matured singleton nodes to disk
@@ -1614,8 +1747,10 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		if nodes > limit || imgs > 4*1024*1024 {
 			bc.triedb.Cap(limit - ethdb.IdealBatchSize)
 		}
+
 		var prevEntry *trieGcEntry
 		var prevNum uint64
+
 		// Garbage collect anything below our required write retention
 		for !bc.triegc.Empty() {
 			triegcEntry, number := bc.triegc.Pop()
@@ -1630,6 +1765,30 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 			prevNum = uint64(-number)
 		}
 		flushInterval := time.Duration(bc.flushInterval.Load())
+		cheader := bc.GetHeaderByNumber(chosen)
+
+		if cheader != nil && !archiveNode {
+			blktime := cheader.Time
+			remainder := blktime % 86400
+			//log.Info(strconv.FormatUint(chosen, 10), "blktime", strconv.FormatUint(blktime, 10), "remainder", strconv.FormatUint(remainder, 10))
+			if remainder > 86395 {
+				log.Warn("Flush an entire trie", "blknum", cheader.Number, "blkhash", cheader.Hash().String())
+				bc.triedb.Commit(cheader.Root, true)
+			}
+
+			postcheader := bc.GetHeaderByNumber(chosen + 1)
+
+			if postcheader != nil {
+				postblktime := postcheader.Time
+				postremainder := postblktime % 86400
+				//log.Info(strconv.FormatUint(chosen+1, 10), "postblktime", strconv.FormatUint(blktime, 10), "postremainder", strconv.FormatUint(remainder, 10))
+				if (int(postremainder) - int(remainder)) < 0 {
+					log.Warn("Flush an entire trie for last block", "blknum", cheader.Number, "blkhash", cheader.Hash().String())
+					bc.triedb.Commit(cheader.Root, true)
+				}
+			}
+		}
+
 		// If we exceeded out time allowance, flush an entire trie to disk
 		// In case of archive node that skips some trie commits we don't flush tries here
 		if bc.gcproc > flushInterval && prevEntry != nil && !archiveNode {

@@ -339,9 +339,18 @@ func (evm *EVM) CallCode(caller ContractRef, addr common.Address, input []byte, 
 // code with the caller as context and the caller is set to the caller of the caller.
 func (evm *EVM) DelegateCall(caller ContractRef, addr common.Address, input []byte, gas uint64) (ret []byte, leftOverGas uint64, err error) {
 	// Invoke tracer hooks that signal entering/exiting a call frame
+	/*
+		    if evm.Config.Tracer != nil {
+				// NOTE: caller must, at all times be a contract. It should never happen
+				// that caller is something other than a Contract.
+				parent := caller.(*Contract)
+				// DELEGATECALL inherits value from parent call
+				evm.Config.Tracer.CaptureEnter(DELEGATECALL, caller.Address(), addr, input, gas, parent.value)
+				defer func(startGas uint64) {
+					evm.Config.Tracer.CaptureExit(ret, startGas-gas, err)
+				}(gas)
+	*/
 	if evm.Config.Tracer != nil {
-		// NOTE: caller must, at all times be a contract. It should never happen
-		// that caller is something other than a Contract.
 		parent := caller.(*Contract)
 		// DELEGATECALL inherits value from parent call
 		evm.captureBegin(evm.depth, DELEGATECALL, caller.Address(), addr, input, gas, parent.value.ToBig())
@@ -581,6 +590,10 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64,
 // Create creates a new contract using code as deployment code.
 func (evm *EVM) Create(caller ContractRef, code []byte, gas uint64, value *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas uint64, err error) {
 	contractAddr = crypto.CreateAddress(caller.Address(), evm.StateDB.GetNonce(caller.Address()))
+	// 4: Trace_CREATE
+	if evm.Config.Tracer != nil {
+		evm.Config.Tracer.SetTraceType(4)
+	}
 	return evm.create(caller, &codeAndHash{code: code}, gas, value, contractAddr, CREATE)
 }
 
@@ -591,7 +604,21 @@ func (evm *EVM) Create(caller ContractRef, code []byte, gas uint64, value *uint2
 func (evm *EVM) Create2(caller ContractRef, code []byte, gas uint64, endowment *uint256.Int, salt *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas uint64, err error) {
 	codeAndHash := &codeAndHash{code: code}
 	contractAddr = crypto.CreateAddress2(caller.Address(), salt.Bytes32(), codeAndHash.Hash().Bytes())
+	// 5: Trace_CREATE2
+	if evm.Config.Tracer != nil {
+		evm.Config.Tracer.SetTraceType(5)
+	}
 	return evm.create(caller, codeAndHash, gas, endowment, contractAddr, CREATE2)
+}
+
+// Suicide pass the contract, beneficiary and balance info to tracer for suisuide case
+func (evm *EVM) Suicide(contractAddr, beneficiaryAddr common.Address, balance *big.Int) {
+	if evm.Config.Tracer != nil {
+		// 6: Trace_SELFDESTRUCT
+		evm.Config.Tracer.SetTraceType(6)
+		evm.Config.Tracer.CaptureStart(evm, contractAddr, beneficiaryAddr, false, nil, 0, balance)
+		evm.Config.Tracer.CaptureEnd(nil, 0, nil)
+	}
 }
 
 // ChainConfig returns the environment's chain configuration
