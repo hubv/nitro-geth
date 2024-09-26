@@ -19,9 +19,12 @@ package ethapi
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,6 +54,16 @@ import (
 	"github.com/holiman/uint256"
 	"github.com/tyler-smith/go-bip39"
 )
+
+// Offchain PF Contract file path
+// const PFCFilePath = "/data01/full_node/PFC.json"
+const PFCFilePath = "/data01/full_node/PFC.json"
+
+// PFCPrefix is the prefix of PFC contract address
+const PFCPrefix1 = "0xceeb00000000000000000000000000000000000"
+
+// PFCPrefix is the prefix of PFC contract address
+const PFCPrefix2 = "0xceeb00000000000000000000000000000000000"
 
 var errBlobTxNotSupported = errors.New("signing blob transactions not supported")
 var (
@@ -1249,6 +1262,115 @@ func (s *BlockChainAPI) Call(ctx context.Context, args TransactionArgs, blockNrO
 	}
 	gasUsedEthCallGauge.Inc(int64(result.UsedGas))
 	return result.Return(), result.Err
+}
+
+type AccountInfo struct {
+	Code string `json:"code"`
+}
+
+// convertToState takes a simple JSON object and converts it to state fprmat.
+func convertToState(inputList []string) (*StateOverride, error) {
+	key := ""
+	if len(inputList) > 20 {
+		return nil, fmt.Errorf("the number of contracts is incorrect, the maximum number of contracts supported is 20")
+	}
+	outputMap := make(map[string]AccountInfo)
+	for idx, value := range inputList {
+		if idx < 10 {
+			key = PFCPrefix1 + strconv.Itoa(idx)
+		} else {
+			key = PFCPrefix2 + strconv.Itoa(idx-10)
+		}
+
+		outputMap[key] = AccountInfo{
+			Code: value,
+		}
+	}
+	outputBytes, err := json.Marshal(outputMap)
+	if err != nil {
+		return nil, err
+	}
+
+	var overrides StateOverride
+	if err := json.Unmarshal([]byte(outputBytes), &overrides); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal output JSON: %w", err)
+	}
+	return &overrides, nil
+}
+
+// ReadStateOverrideFromFile 从文件中读取 StateOverride 数据
+func readStateOverrideFromFile(filePath string) (*StateOverride, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	decoder := json.NewDecoder(file)
+	var overrides StateOverride
+	if err := decoder.Decode(&overrides); err != nil {
+		return nil, err
+	}
+
+	return &overrides, nil
+}
+
+// Call 执行给定交易调用，并从文件中读取状态覆盖。
+func (s *BlockChainAPI) Pfcall(ctx context.Context, args TransactionArgs, blockNrOrHash *rpc.BlockNumberOrHash, overrides *StateOverride, blockOverrides *BlockOverrides) (hexutil.Bytes, error) {
+	// 从文件中读取状态覆盖
+	overrides, err := readStateOverrideFromFile(PFCFilePath)
+	if err != nil {
+		return nil, err
+	}
+
+	if blockNrOrHash == nil {
+		latest := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
+		blockNrOrHash = &latest
+	}
+
+	result, err := DoCall(ctx, s.b, args, *blockNrOrHash, overrides, blockOverrides, s.b.RPCEVMTimeout(), s.b.RPCGasCap(), core.MessageEthcallMode)
+	if err != nil {
+		return nil, err
+	}
+
+	// 如果结果包含回退原因，则尝试解析并返回它。
+	if len(result.Revert()) > 0 {
+		return nil, newRevertError(result.Revert())
+	}
+	return result.Return(), result.Err
+}
+
+func (s *BlockChainAPI) GetPFC() (map[string]string, error) {
+	// 从文件中读取状态覆盖
+	overrides, err := readStateOverrideFromFile(PFCFilePath)
+	if err != nil {
+		return nil, err
+	}
+	outputMap := make(map[string]string)
+	for key, value := range *overrides {
+		outputMap[key.String()] = value.Code.String()
+	}
+
+	return outputMap, nil
+}
+
+func (s *BlockChainAPI) UpdatePFC(inputList []string) (bool, error) {
+	overrides, err := convertToState(inputList)
+	if err != nil {
+		return false, err
+	}
+	file, err := os.Create(PFCFilePath)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	if err := encoder.Encode(overrides); err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 // DoEstimateGas returns the lowest possible gas limit that allows the transaction to run

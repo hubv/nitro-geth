@@ -1454,132 +1454,141 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 	if err := blockBatch.Write(); err != nil {
 		log.Crit("Failed to write block into disk", "err", err)
 	}
-	t := time.Unix(int64(block.Time()), 0)
-	day := t.UTC().Format("2006-01-02")
-	blknum := block.Number().String()
-	hash_prefix := block.Hash().String()
-	txfile := fmt.Sprintf("%s_%s.csv", blknum, hash_prefix[2:8])
 
-	var file1 *os.File = nil
-	var file2 *os.File = nil
-	var file3 *os.File = nil
-	signer := types.MakeSigner(bc.Config(), block.Number(), block.Time())
-	blockContext := NewEVMBlockContext(block.Header(), bc, nil)
-	usedGas := new(uint64)
-	gp := new(GasPool).AddGas(block.GasLimit())
+	// 从环境变量中读取名为 `ENABLE_FEATURE` 的变量值。
+	disableDump := os.Getenv("DISABLE_DUMP")
 
-	cfg := vm.Config{NoBaseFee: true}
-	txinfo := vm.NewTxInfo()
-	if block.Transactions().Len() != 0 {
+	// 将字符串转换为布尔值。这里我们假设环境变量中的值应该是 "true" 或 "false"。
+	// 注意：如果环境变量不存在或值不是 "true"，`strconv.ParseBool` 将返回 false。
+	disableDumpTrace, err := strconv.ParseBool(disableDump)
+	if err != nil || !disableDumpTrace {
+		t := time.Unix(int64(block.Time()), 0)
+		day := t.UTC().Format("2006-01-02")
+		blknum := block.Number().String()
+		hash_prefix := block.Hash().String()
+		txfile := fmt.Sprintf("%s_%s.csv", blknum, hash_prefix[2:8])
 
-		blkinfo := vm.NewBlockInfo(block.Time(), day, block.Hash().Hex(), blknum)
+		var file1 *os.File = nil
+		var file2 *os.File = nil
+		var file3 *os.File = nil
+		signer := types.MakeSigner(bc.Config(), block.Number(), block.Time())
+		blockContext := NewEVMBlockContext(block.Header(), bc, nil)
+		usedGas := new(uint64)
+		gp := new(GasPool).AddGas(block.GasLimit())
 
-		path1 := "/data01/full_node/dump"
-		path2 := "/data01/full_node/events"
+		cfg := vm.Config{NoBaseFee: true}
+		txinfo := vm.NewTxInfo()
+		if block.Transactions().Len() != 0 {
 
-		//path := "/Users/vincent/Downloads/heco/dump"
-		subpath1 := filepath.Join(path1, day, strconv.Itoa(t.UTC().Hour()))
-		if _, err1 := os.Stat(subpath1); os.IsNotExist(err1) {
-			err1 = os.MkdirAll(subpath1, os.ModePerm)
-			if err1 != nil {
-				fmt.Printf("failed creating subpath: %s", err1)
-			}
-		}
+			blkinfo := vm.NewBlockInfo(block.Time(), day, block.Hash().Hex(), blknum)
 
-		var err12 error
-		file1, err12 = os.OpenFile(filepath.Join(subpath1, txfile), os.O_WRONLY|os.O_CREATE, 0644)
+			path1 := "/data01/full_node/dump"
+			path2 := "/data01/full_node/events"
 
-		if err12 != nil {
-			fmt.Printf("failed creating file: %s", err12)
-			file1 = nil
-		}
-		datawriter1 := bufio.NewWriter(file1)
-
-		if block.Bloom().Big().String() != "0" {
-			subpath2 := filepath.Join(path2, day, strconv.Itoa(t.UTC().Hour()))
-			if _, err2 := os.Stat(subpath2); os.IsNotExist(err2) {
-				err2 = os.MkdirAll(subpath2, os.ModePerm)
-				if err2 != nil {
-					fmt.Printf("failed creating subpath: %s", err2)
+			//path := "/Users/vincent/Downloads/heco/dump"
+			subpath1 := filepath.Join(path1, day, strconv.Itoa(t.UTC().Hour()))
+			if _, err1 := os.Stat(subpath1); os.IsNotExist(err1) {
+				err1 = os.MkdirAll(subpath1, os.ModePerm)
+				if err1 != nil {
+					fmt.Printf("failed creating subpath: %s", err1)
 				}
 			}
 
-			var err22 error
-			file2, err22 = os.OpenFile(filepath.Join(subpath2, txfile), os.O_WRONLY|os.O_CREATE, 0644)
+			var err12 error
+			file1, err12 = os.OpenFile(filepath.Join(subpath1, txfile), os.O_WRONLY|os.O_CREATE, 0644)
 
-			if err22 != nil {
-				fmt.Printf("failed creating file: %s", err22)
-				file2 = nil
+			if err12 != nil {
+				fmt.Printf("failed creating file: %s", err12)
+				file1 = nil
 			}
+			datawriter1 := bufio.NewWriter(file1)
 
-		}
-
-		datawriter2 := bufio.NewWriter(file2)
-
-		cfg.Tracer = vm.NewCSVTracer(blkinfo, txinfo, datawriter1, datawriter2)
-	}
-
-	parent := bc.GetBlock(block.ParentHash(), block.NumberU64()-1)
-	if parent == nil {
-		log.Error("parent not found ", "block", block.NumberU64()-1)
-	}
-	statedb, err := bc.StateAt(parent.Header().Root)
-	if err != nil {
-		log.Error("parent statedb not found ", "block", block.NumberU64()-1)
-	}
-
-	// Iterate over and process the individual transactions
-	for i, tx := range block.Transactions() {
-		msg, err := TransactionToMessage(tx, signer, block.Header().BaseFee, MessageReplayMode)
-		if err != nil {
-			log.Error("TransactionToMessage err", "err", err)
-		}
-		vmenv := vm.NewEVM(blockContext, NewEVMTxContext(msg), statedb, bc.chainConfig, cfg)
-		txhash := tx.Hash().Hex()
-		if msg.To != nil {
-			txinfo.UpdateTxInfo(i, txhash, msg.From.Hex(), msg.To.Hex())
-		} else {
-			txinfo.UpdateTxInfo(i, txhash, msg.From.Hex(), "")
-		}
-
-		statedb.SetTxContext(tx.Hash(), i)
-		_, _, reason, err := applyTransaction2(msg, bc.chainConfig, gp, statedb, block.Number(), block.Hash(), tx, usedGas, vmenv, nil)
-		if err != nil {
-			log.Error("applyTransaction2 err", "err", err)
-		}
-		if reason != "" {
-			path3 := "/data01/full_node/errors"
-			subpath3 := filepath.Join(path3, day, strconv.Itoa(t.UTC().Hour()))
-			if _, err3 := os.Stat(subpath3); os.IsNotExist(err3) {
-				err3 = os.MkdirAll(subpath3, os.ModePerm)
-				if err3 != nil {
-					fmt.Printf("failed creating subpath: %s", err3)
+			if block.Bloom().Big().String() != "0" {
+				subpath2 := filepath.Join(path2, day, strconv.Itoa(t.UTC().Hour()))
+				if _, err2 := os.Stat(subpath2); os.IsNotExist(err2) {
+					err2 = os.MkdirAll(subpath2, os.ModePerm)
+					if err2 != nil {
+						fmt.Printf("failed creating subpath: %s", err2)
+					}
 				}
+
+				var err22 error
+				file2, err22 = os.OpenFile(filepath.Join(subpath2, txfile), os.O_WRONLY|os.O_CREATE, 0644)
+
+				if err22 != nil {
+					fmt.Printf("failed creating file: %s", err22)
+					file2 = nil
+				}
+
 			}
 
-			var err32 error
-			file3, err32 = os.OpenFile(filepath.Join(subpath3, txfile), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+			datawriter2 := bufio.NewWriter(file2)
 
-			if err32 != nil {
-				fmt.Printf("failed creating file: %s", err32)
-				file3 = nil
+			cfg.Tracer = vm.NewCSVTracer(blkinfo, txinfo, datawriter1, datawriter2)
+		}
+
+		parent := bc.GetBlock(block.ParentHash(), block.NumberU64()-1)
+		if parent == nil {
+			log.Error("parent not found ", "block", block.NumberU64()-1)
+		}
+		statedb, err := bc.StateAt(parent.Header().Root)
+		if err != nil {
+			log.Error("parent statedb not found ", "block", block.NumberU64()-1)
+		}
+
+		// Iterate over and process the individual transactions
+		for i, tx := range block.Transactions() {
+			msg, err := TransactionToMessage(tx, signer, block.Header().BaseFee, MessageReplayMode)
+			if err != nil {
+				log.Error("TransactionToMessage err", "err", err)
 			}
-			datawriter3 := bufio.NewWriter(file3)
-			errinfo := []string{
-				strings.ToLower(txhash),
-				reason}
-			_, _ = datawriter3.WriteString(strings.Join(errinfo, "^") + "\n")
-			datawriter3.Flush()
-		}
-	}
-	if block.Transactions().Len() != 0 && file1 != nil {
-		//close file, so that finalize can reopen it for systemTxs traces
-		file1.Close()
+			vmenv := vm.NewEVM(blockContext, NewEVMTxContext(msg), statedb, bc.chainConfig, cfg)
+			txhash := tx.Hash().Hex()
+			if msg.To != nil {
+				txinfo.UpdateTxInfo(i, txhash, msg.From.Hex(), msg.To.Hex())
+			} else {
+				txinfo.UpdateTxInfo(i, txhash, msg.From.Hex(), "")
+			}
 
-		if block.Bloom().Big().String() != "0" && file2 != nil {
-			file2.Close()
-		}
+			statedb.SetTxContext(tx.Hash(), i)
+			_, _, reason, err := applyTransaction2(msg, bc.chainConfig, gp, statedb, block.Number(), block.Hash(), tx, usedGas, vmenv, nil)
+			if err != nil {
+				log.Error("applyTransaction2 err", "err", err)
+			}
+			if reason != "" {
+				path3 := "/data01/full_node/errors"
+				subpath3 := filepath.Join(path3, day, strconv.Itoa(t.UTC().Hour()))
+				if _, err3 := os.Stat(subpath3); os.IsNotExist(err3) {
+					err3 = os.MkdirAll(subpath3, os.ModePerm)
+					if err3 != nil {
+						fmt.Printf("failed creating subpath: %s", err3)
+					}
+				}
 
+				var err32 error
+				file3, err32 = os.OpenFile(filepath.Join(subpath3, txfile), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+
+				if err32 != nil {
+					fmt.Printf("failed creating file: %s", err32)
+					file3 = nil
+				}
+				datawriter3 := bufio.NewWriter(file3)
+				errinfo := []string{
+					strings.ToLower(txhash),
+					reason}
+				_, _ = datawriter3.WriteString(strings.Join(errinfo, "^") + "\n")
+				datawriter3.Flush()
+			}
+		}
+		if block.Transactions().Len() != 0 && file1 != nil {
+			//close file, so that finalize can reopen it for systemTxs traces
+			file1.Close()
+
+			if block.Bloom().Big().String() != "0" && file2 != nil {
+				file2.Close()
+			}
+
+		}
 	}
 	// Commit all cached state changes into underlying memory database.
 	root, err := state.Commit(block.NumberU64(), bc.chainConfig.IsEIP158(block.Number()))
