@@ -175,28 +175,39 @@ func ApplyTransactionWithEVM(msg *Message, config *params.ChainConfig, gp *GasPo
 	return receipt, result, err
 }
 
-func applyTransaction2(msg *Message, config *params.ChainConfig, gp *GasPool, statedb *state.StateDB, blockNumber *big.Int, blockHash common.Hash, tx *types.Transaction, usedGas *uint64, evm *vm.EVM, resultFilter func(*ExecutionResult) error) (*types.Receipt, *ExecutionResult, string, error) {
+// ApplyTransactionWithEVM2 attempts to apply a transaction to the given state database
+// and uses the input parameters for its environment similar to ApplyTransaction. However,
+// this method takes an already created EVM instance as input.
+func ApplyTransactionWithEVM2(msg *Message, config *params.ChainConfig, gp *GasPool, statedb *state.StateDB, blockNumber *big.Int, blockHash common.Hash, tx *types.Transaction, usedGas *uint64, evm *vm.EVM, resultFilter func(*ExecutionResult) error) (receipt *types.Receipt, result *ExecutionResult, revertreason string, err error) {
+	if evm.Config.Tracer != nil && evm.Config.Tracer.OnTxStart != nil {
+		evm.Config.Tracer.OnTxStart(evm.GetVMContext(), tx, msg.From)
+		if evm.Config.Tracer.OnTxEnd != nil {
+			defer func() {
+				evm.Config.Tracer.OnTxEnd(receipt, err)
+			}()
+		}
+	}
 	// Create a new context to be used in the EVM environment.
 	txContext := NewEVMTxContext(msg)
 	evm.Reset(txContext, statedb)
-	revertreason := ""
+
 	// Apply the transaction to the current state (included in the env).
-	result, err := ApplyMessage(evm, msg, gp)
+	result, err = ApplyMessage(evm, msg, gp)
 	if err != nil {
 		return nil, nil, revertreason, err
-	}
-
-	if resultFilter != nil {
-		err = resultFilter(result)
-		if err != nil {
-			return nil, nil, revertreason, err
-		}
 	}
 
 	if len(result.Revert()) > 0 {
 		reason, errUnpack := abi.UnpackRevert(result.Revert())
 		if errUnpack == nil {
 			revertreason = reason
+		}
+	}
+
+	if resultFilter != nil {
+		err = resultFilter(result)
+		if err != nil {
+			return nil, nil, revertreason, err
 		}
 	}
 
@@ -211,7 +222,7 @@ func applyTransaction2(msg *Message, config *params.ChainConfig, gp *GasPool, st
 
 	// Create a new receipt for the transaction, storing the intermediate root and gas used
 	// by the tx.
-	receipt := &types.Receipt{Type: tx.Type(), PostState: root, CumulativeGasUsed: *usedGas}
+	receipt = &types.Receipt{Type: tx.Type(), PostState: root, CumulativeGasUsed: *usedGas}
 	if result.Failed() {
 		receipt.Status = types.ReceiptStatusFailed
 	} else {
@@ -219,6 +230,11 @@ func applyTransaction2(msg *Message, config *params.ChainConfig, gp *GasPool, st
 	}
 	receipt.TxHash = tx.Hash()
 	receipt.GasUsed = result.UsedGas
+
+	if tx.Type() == types.BlobTxType {
+		receipt.BlobGasUsed = uint64(len(tx.BlobHashes()) * params.BlobTxBlobGasPerBlob)
+		receipt.BlobGasPrice = evm.Context.BlobBaseFee
+	}
 
 	// If the transaction created a contract, store the creation address in the receipt.
 	if result.TopLevelDeployed != nil {

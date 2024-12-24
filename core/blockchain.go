@@ -45,6 +45,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/eth/tracers/logger"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/internal/syncx"
@@ -1583,10 +1584,10 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		gp := new(GasPool).AddGas(block.GasLimit())
 
 		cfg := vm.Config{NoBaseFee: true}
-		txinfo := vm.NewTxInfo()
+		txinfo := logger.NewTxInfo()
 		if block.Transactions().Len() != 0 {
 
-			blkinfo := vm.NewBlockInfo(block.Time(), day, block.Hash().Hex(), blknum)
+			blkinfo := logger.NewBlockInfo(block.Time(), day, block.Hash().Hex(), blknum)
 
 			path1 := "/data01/full_node/dump"
 			path2 := "/data01/full_node/events"
@@ -1630,7 +1631,9 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 
 			datawriter2 := bufio.NewWriter(file2)
 
-			cfg.Tracer = vm.NewCSVTracer(blkinfo, txinfo, datawriter1, datawriter2)
+			tracer := logger.NewCSVTracer(blkinfo, txinfo, datawriter1, datawriter2)
+			cfg.Tracer = tracer.Hooks()
+
 		}
 
 		parent := bc.GetBlock(block.ParentHash(), block.NumberU64()-1)
@@ -1657,7 +1660,7 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 			}
 
 			statedb.SetTxContext(tx.Hash(), i)
-			_, _, reason, err := applyTransaction2(msg, bc.chainConfig, gp, statedb, block.Number(), block.Hash(), tx, usedGas, vmenv, nil)
+			_, _, reason, err := ApplyTransactionWithEVM2(msg, bc.chainConfig, gp, statedb, block.Number(), block.Hash(), tx, usedGas, vmenv, nil)
 			if err != nil {
 				log.Error("applyTransaction2 err", "err", err)
 			}

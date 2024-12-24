@@ -13,7 +13,7 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
-package vm
+package logger
 
 import (
 	"bufio"
@@ -23,6 +23,8 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/tracing"
+	"github.com/ethereum/go-ethereum/core/vm"
 )
 
 type TraceType int8
@@ -175,12 +177,29 @@ func NewTxInfo() *TxInfo {
 	return t
 }
 
-// NewCSVTracer creates a new EVM tracer that prints execution traces in CSV
-// into the provided stream.
-// func NewCSVTracer(blkinfo *BlockInfo, txinfo *TxInfo, p *kafka.Producer, w *bufio.Writer) *CSVTracer {
 func NewCSVTracer(blkinfo *BlockInfo, txinfo *TxInfo, w1 *bufio.Writer, w2 *bufio.Writer) *CSVTracer {
 	t := &CSVTracer{blkinfo, txinfo, NewStack(), make(map[int]bool), make(map[int]map[int]int), 0, 0, w1, w2}
 	return t
+}
+
+func GetCopy(mem []byte, offset uint64, size uint64) (cpy []byte) {
+	if size == 0 {
+		return nil
+	}
+
+	// memory is always resized before being accessed, no need to check bounds
+	cpy = make([]byte, size)
+	copy(cpy, mem[offset:offset+size])
+	return
+}
+
+func (t *CSVTracer) Hooks() *tracing.Hooks {
+	return &tracing.Hooks{
+		OnEnter:      t.OnEnter,
+		OnExit:       t.OnExit,
+		OnOpcode:     t.OnOpcode,
+		SetTraceType: t.SetTraceType,
+	}
 }
 
 func (t *TxInfo) UpdateTxInfo(pos int, hash string, from string, to string) {
@@ -190,97 +209,28 @@ func (t *TxInfo) UpdateTxInfo(pos int, hash string, from string, to string) {
 	t.txpos = pos
 }
 
-// TracerCSV is used to collect execution traces from an EVM transaction
-// execution. CaptureState is called for each step of the VM with the
-// current VM state.
-// Note that reference types are actual VM data structures; make copies
-// if you need to retain them beyond the current call.
-type TracerCSV interface {
-	// Arbitrum: capture a transfer, mint, or burn that happens outside of EVM exectuion
-	CaptureArbitrumTransfer(env *EVM, from, to *common.Address, value *big.Int, before bool, purpose string)
-	CaptureArbitrumStorageGet(key common.Hash, depth int, before bool)
-	CaptureArbitrumStorageSet(key, value common.Hash, depth int, before bool)
-	CaptureTxStart(gasLimit uint64)
-	CaptureTxEnd(restGas uint64)
-	CaptureStart(env *EVM, from common.Address, to common.Address, calltype int8, input []byte, gas uint64, value *big.Int)
-	CaptureState(env *EVM, pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, rData []byte, depth int, err error)
-	CaptureFault(env *EVM, pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, depth int, err error)
-	CaptureEnd(output []byte, gasUsed uint64, err error)
-	CaptureStylusHostio(name string, args, outs []byte, startInk, endInk uint64)
-}
-
 func (t *CSVTracer) SetTraceType(tracetype int8) {
 	t.traceType = tracetype
 }
 
-func (t *CSVTracer) CaptureStart(env *EVM, from, to common.Address, create bool, input []byte, gas uint64, value *big.Int) {
-	//fmt.Print("Start>>> Depth: ", env.depth, " TracePos: ", t.traceNum, "\n")
-	ti := TraceInfo{
-		subtraces:  0,
-		traceaddr:  "",
-		trType:     Trace_UNKNOWN,
-		from:       from.String(),
-		to:         to.String(),
-		gas:        gas,
-		value:      value.String(),
-		callType:   Trace_UNKNOWN,
-		input:      common.Bytes2Hex(input),
-		output:     "",
-		gasUsed:    0,
-		err:        "",
-		tracePos:   t.traceNum,
-		traceDepth: env.depth,
-	}
-
-	if t.traceType <= int8(Trace_STATICCALL) {
-		ti.trType = Trace_CALL
-		ti.callType = TraceType(t.traceType)
-	} else {
-		ti.trType = TraceType(t.traceType)
-	}
-
-	if t.s.Top() == nil {
-		ti.traceaddr = "["
-	} else {
-		// get the traceaddr info of its parent
-		pos := t.s.Top().Value
-		top := &(t.txInfo.traces[pos])
-		if top.tracePos > 0 {
-			ti.traceaddr = top.traceaddr + "," + strconv.Itoa(int(top.subtraces))
-		} else {
-			ti.traceaddr = top.traceaddr + strconv.Itoa(int(top.subtraces))
-		}
-		top.subtraces += 1
-	}
-	t.txInfo.traces = append(t.txInfo.traces, ti)
-	t.s.Push(&Node{t.traceNum})
-	t.traceNum += 1
-}
-
-func (t *CSVTracer) CaptureFault(pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, depth int, err error) {
-	/*
-		if err != nil {
-			t.txInfo.traces[t.traceNum-1].err = err.Error()
-		}
-	*/
-}
-
 // CaptureState outputs state information on the logger.
-func (t *CSVTracer) CaptureState(pc uint64, op OpCode, gas, cost uint64, scope *ScopeContext, rData []byte, depth int, err error) {
-	if err == nil && strings.HasPrefix(op.String(), "LOG") {
+func (t *CSVTracer) OnOpcode(pc uint64, op byte, gas, cost uint64, scope tracing.OpContext, rData []byte, depth int, err error) {
+	vmOP := vm.OpCode(op)
+	if err == nil && strings.HasPrefix(vmOP.String(), "LOG") {
 		logindex := len(t.txInfo.logs)
-		memory := scope.Memory
-		stack := scope.Stack
-		topicCount, _ := strconv.Atoi(strings.Split(op.String(), "LOG")[1])
-		address := scope.Contract.Address().String()
+		memory := scope.MemoryData()
+		stack := scope.StackData()
+		topicCount, _ := strconv.Atoi(strings.Split(vmOP.String(), "LOG")[1])
+		address := scope.Address().String()
 		data := []byte{uint8(0)}
-		if stack.len() >= 2 {
-			data = memory.GetCopy(stack.peek().ToBig().Int64(), stack.Back(1).ToBig().Int64())
+		if len(stack) >= 2 {
+			data = GetCopy(memory, stack[len(stack)-1].ToBig().Uint64(), stack[len(stack)-2].ToBig().Uint64())
 		}
 		topics := make([]string, int(topicCount), int(topicCount+1))
-		if topicCount != 0 && stack.len() >= topicCount+2 {
+		if topicCount != 0 && len(stack) >= topicCount+2 {
 			for i := 0; i < topicCount; i++ {
-				addr := stack.Back(i + 2)
+
+				addr := stack[len(stack)-3-i]
 				topics[i] = "0x" + common.Bytes2Hex(addr.PaddedBytes(32))
 			}
 		} else {
@@ -308,8 +258,51 @@ func (t *CSVTracer) CaptureState(pc uint64, op OpCode, gas, cost uint64, scope *
 	}
 }
 
-// CaptureEnd is triggered at end of execution.
-func (t *CSVTracer) CaptureEnd(output []byte, gasUsed uint64, err error) {
+func (t *CSVTracer) OnEnter(depth int, typ byte, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
+
+	ti := TraceInfo{
+		subtraces:  0,
+		traceaddr:  "",
+		trType:     Trace_UNKNOWN,
+		from:       from.String(),
+		to:         to.String(),
+		gas:        gas,
+		value:      value.String(),
+		callType:   Trace_UNKNOWN,
+		input:      common.Bytes2Hex(input),
+		output:     "",
+		gasUsed:    0,
+		err:        "",
+		tracePos:   t.traceNum,
+		traceDepth: depth,
+	}
+
+	if t.traceType <= int8(Trace_STATICCALL) {
+		ti.trType = Trace_CALL
+		ti.callType = TraceType(t.traceType)
+	} else {
+		ti.trType = TraceType(t.traceType)
+	}
+
+	if t.s.Top() == nil {
+		ti.traceaddr = "["
+	} else {
+		// get the traceaddr info of its parent
+		pos := t.s.Top().Value
+		top := &(t.txInfo.traces[pos])
+		if top.tracePos > 0 {
+			ti.traceaddr = top.traceaddr + "," + strconv.Itoa(int(top.subtraces))
+		} else {
+			ti.traceaddr = top.traceaddr + strconv.Itoa(int(top.subtraces))
+		}
+		top.subtraces += 1
+	}
+	t.txInfo.traces = append(t.txInfo.traces, ti)
+	t.s.Push(&Node{t.traceNum})
+	t.traceNum += 1
+}
+
+func (t *CSVTracer) OnExit(depth int, output []byte, gasUsed uint64, err error, reverted bool) {
 	pos := t.s.Pop().Value
 	ti := &(t.txInfo.traces[pos])
 	ti.gasUsed = gasUsed
@@ -328,15 +321,6 @@ func (t *CSVTracer) CaptureEnd(output []byte, gasUsed uint64, err error) {
 		t.logs_list = map[int]map[int]int{}
 	}
 }
-
-func (t *CSVTracer) CaptureEnter(typ OpCode, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
-}
-
-func (t *CSVTracer) CaptureExit(output []byte, gasUsed uint64, err error) {}
-
-func (t *CSVTracer) CaptureTxStart(gasLimit uint64) {}
-
-func (t *CSVTracer) CaptureTxEnd(restGas uint64) {}
 
 func (t *CSVTracer) dumpCSV() {
 	//fmt.Println(time.Now().UnixNano())
@@ -408,12 +392,3 @@ func (t *CSVTracer) dumpCSV() {
 	}
 	t.w2.Flush()
 }
-
-func (t *CSVTracer) CaptureArbitrumTransfer(env *EVM, from, to *common.Address, value *big.Int, before bool, purpose string) {
-}
-
-func (t *CSVTracer) CaptureArbitrumStorageGet(key common.Hash, depth int, before bool) {}
-
-func (t *CSVTracer) CaptureArbitrumStorageSet(key, value common.Hash, depth int, before bool) {}
-
-func (t *CSVTracer) CaptureStylusHostio(name string, args, outs []byte, startInk, endInk uint64) {}

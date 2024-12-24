@@ -176,6 +176,8 @@ type (
 	CaptureArbitrumStorageSetHook = func(key, value common.Hash, depth int, before bool)
 
 	CaptureStylusHostioHook = func(name string, args, outs []byte, startInk, endInk uint64)
+
+	SetTraceTypeHook = func(tracetype int8)
 )
 
 type Hooks struct {
@@ -202,6 +204,8 @@ type Hooks struct {
 	OnCodeChange    CodeChangeHook
 	OnStorageChange StorageChangeHook
 	OnLog           LogHook
+
+	SetTraceType SetTraceTypeHook
 
 	// Arbitrum: capture a transfer, mint, or burn that happens outside of EVM execution
 	CaptureArbitrumTransfer   CaptureArbitrumTransferHook
