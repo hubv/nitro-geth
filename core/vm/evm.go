@@ -419,7 +419,7 @@ func (evm *EVM) StaticCall(caller ContractRef, addr common.Address, input []byte
 		if evm.Config.Tracer.SetTraceType != nil {
 			evm.Config.Tracer.SetTraceType(3)
 		}
-		evm.captureBegin(evm.depth, STATICCALL, caller.Address(), addr, input, gas, nil)
+		evm.captureBegin(evm.depth, STATICCALL, caller.Address(), addr, input, gas, big.NewInt(0))
 		defer func(startGas uint64) {
 			evm.captureEnd(evm.depth, startGas, leftOverGas, ret, err)
 		}(gas)

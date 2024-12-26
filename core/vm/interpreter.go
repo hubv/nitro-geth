@@ -273,21 +273,11 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 			if !contract.UseGas(dynamicCost, in.evm.Config.Tracer, tracing.GasChangeIgnored) {
 				return nil, ErrOutOfGas
 			}
-
-			// Do tracing before memory expansion
-			if debug {
-				if in.evm.Config.Tracer.OnGasChange != nil {
-					in.evm.Config.Tracer.OnGasChange(gasCopy, gasCopy-cost, tracing.GasChangeCallOpCode)
-				}
-				if in.evm.Config.Tracer.OnOpcode != nil {
-					in.evm.Config.Tracer.OnOpcode(pc, byte(op), gasCopy, cost, callContext, in.returnData, in.evm.depth, VMErrorFromErr(err))
-					logged = true
-				}
-			}
 			if memorySize > 0 {
 				mem.Resize(memorySize)
 			}
-		} else if debug {
+		}
+		if debug {
 			if in.evm.Config.Tracer.OnGasChange != nil {
 				in.evm.Config.Tracer.OnGasChange(gasCopy, gasCopy-cost, tracing.GasChangeCallOpCode)
 			}
