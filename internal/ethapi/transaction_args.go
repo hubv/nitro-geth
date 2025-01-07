@@ -382,7 +382,7 @@ func (args *TransactionArgs) setGasUsingCap(globalGasCap uint64) {
 	if args.gasNotSetByUser {
 		gas := globalGasCap
 		if gas == 0 {
-			gas = uint64(math.MaxUint64 / 2)
+			gas = uint64(math.MaxUint64)
 		}
 		args.Gas = (*hexutil.Uint64)(&gas)
 	} else {

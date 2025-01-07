@@ -270,6 +270,8 @@ func (l *StructLogger) OnTxEnd(receipt *types.Receipt, err error) {
 	}
 	l.usedGas = receipt.GasUsed
 }
+func (l *StructLogger) SetTraceType(tracetype int8) {
+}
 
 // StructLogs returns the captured log entries.
 func (l *StructLogger) StructLogs() []StructLog { return l.logs }
